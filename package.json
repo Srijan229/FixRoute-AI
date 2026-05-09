@@ -1,0 +1,24 @@
+{
+  "name": "fixroute-ai",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Knowledge graph MVP for ticket routing on microsoft/vscode",
+  "scripts": {
+    "dev:check": "tsx src/scripts/validateGraph.ts",
+    "fetch:issues": "tsx src/scripts/fetchIssues.ts",
+    "fetch:prs": "tsx src/scripts/fetchPullRequests.ts",
+    "normalize:graph": "tsx src/scripts/normalizeGraph.ts",
+    "build:graph": "tsx src/scripts/buildGraph.ts",
+    "validate:graph": "tsx src/scripts/validateGraph.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "neo4j-driver": "^5.28.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.17",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  }
+}
