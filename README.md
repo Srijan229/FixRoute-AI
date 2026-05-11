@@ -45,11 +45,47 @@ npm run fetch:issues
 npm run fetch:prs
 npm run normalize:graph
 npm run build:graph
+npm run create:embeddings
+npm run create:embeddings -- --reset
+npm run build:benchmark -- --limit 50
+npm run evaluate:agent -- --limit 20
+npm run serve:api
+npm run query:graph -- --issue-number 153829
+npm run query:graph -- --title "snippet session"
+npm run recommend:ticket -- --title "Cannot read properties of undefined" --description "Snippet session crashes while applying edits"
 npm run validate:graph
 npm run typecheck
+```
+
+## API
+
+Start the local API:
+
+```bash
+npm run serve:api
+```
+
+Health check:
+
+```bash
+GET /health
+```
+
+Recommendation endpoint:
+
+```bash
+POST /api/recommend
+Content-Type: application/json
+
+{
+  "title": "Cannot read properties of undefined",
+  "description": "Snippet session crashes while applying edits",
+  "topK": 5
+}
 ```
 
 ## Notes
 
 - This repo intentionally excludes local secrets, checkpoints, and generated datasets from version control.
 - The graph is built from one selected repository only: `microsoft/vscode`.
+- Semantic retrieval defaults to a local embedding provider. Set `EMBEDDING_PROVIDER=gemini` and `GEMINI_API_KEY` to use Gemini embeddings instead. Gemini embeddings API reference: https://ai.google.dev/api/embeddings

@@ -43,6 +43,14 @@ async function createConstraints(session: Session): Promise<void> {
   }
 }
 
+async function resetGraph(session: Session): Promise<void> {
+  await session.run(`
+    MATCH (n)
+    WHERE n:Issue OR n:PullRequest OR n:File OR n:Component OR n:Label OR n:Developer
+    DETACH DELETE n
+  `);
+}
+
 async function writeBatches<T>(
   session: Session,
   items: T[],
@@ -74,6 +82,7 @@ async function main() {
 
   try {
     await neo4jClient.verifyConnection();
+    await resetGraph(session);
     await createConstraints(session);
 
     await writeBatches(

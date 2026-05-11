@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { loadEnv } from "../config/env.js";
+import { loadGitHubEnv } from "../config/env.js";
 import { loadCheckpoint, saveCheckpoint } from "../lib/checkpoint.js";
 import { createGitHubClient } from "../lib/github.js";
 import { logInfo } from "../lib/logger.js";
@@ -38,7 +38,7 @@ function isPullRequestIssue(issue: GitHubIssue): boolean {
 }
 
 async function main() {
-  const env = loadEnv();
+  const env = loadGitHubEnv();
   const github = createGitHubClient();
   const existingIssues = loadExistingIssues();
   const checkpoint = loadCheckpoint<IssuesCheckpoint>(CHECKPOINT_NAME) ?? {

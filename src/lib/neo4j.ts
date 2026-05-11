@@ -1,5 +1,5 @@
 import neo4j, { type Driver, type Session } from "neo4j-driver";
-import { loadEnv } from "../config/env.js";
+import { loadNeo4jEnv } from "../config/env.js";
 
 export type Neo4jClient = {
   close: () => Promise<void>;
@@ -8,7 +8,7 @@ export type Neo4jClient = {
 };
 
 export function createNeo4jClient(): Neo4jClient {
-  const env = loadEnv();
+  const env = loadNeo4jEnv();
   const driver: Driver = neo4j.driver(
     env.NEO4J_URI,
     neo4j.auth.basic(env.NEO4J_USERNAME, env.NEO4J_PASSWORD)

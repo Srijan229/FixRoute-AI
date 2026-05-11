@@ -12,6 +12,7 @@ import type {
   GraphLabelNode,
   GraphPullRequestNode,
   GraphRelationship,
+  HoldoutSplit,
   LinkedPullRequestRecord
 } from "../lib/types.js";
 
@@ -23,7 +24,31 @@ const PULL_REQUESTS_PATH = path.resolve(
   "pullRequests",
   "linkedPullRequests.json"
 );
+const HOLDOUT_PATH = path.resolve(process.cwd(), "data", "processed", "evaluation", "holdout.json");
 const OUTPUT_PATH = path.resolve(process.cwd(), "data", "processed", "graph", "graphData.json");
+
+type Args = {
+  holdout: "train" | null;
+};
+
+function parseArgs(argv: string[]): Args {
+  let holdout: "train" | null = null;
+
+  for (let index = 0; index < argv.length; index += 1) {
+    if (argv[index] === "--holdout" && argv[index + 1]) {
+      const value = argv[index + 1];
+
+      if (value !== "train") {
+        throw new Error("--holdout currently supports only 'train'");
+      }
+
+      holdout = value;
+      index += 1;
+    }
+  }
+
+  return { holdout };
+}
 
 function loadJsonFile<T>(filePath: string, missingFileMessage: string): T {
   if (!fs.existsSync(filePath)) {
@@ -67,6 +92,7 @@ function normalizePullRequest(record: LinkedPullRequestRecord): GraphPullRequest
 }
 
 function main() {
+  const args = parseArgs(process.argv.slice(2));
   const issues = loadJsonFile<GitHubIssue[]>(
     ISSUES_PATH,
     "Missing issue dataset. Run fetch:issues first."
@@ -75,6 +101,16 @@ function main() {
     PULL_REQUESTS_PATH,
     "Missing pull request dataset. Run fetch:prs first."
   );
+  const holdoutSplit = args.holdout
+    ? loadJsonFile<HoldoutSplit>(HOLDOUT_PATH, "Missing holdout split. Run build:holdout first.")
+    : null;
+  const allowedIssueNumbers = holdoutSplit ? new Set(holdoutSplit.train_issue_numbers) : null;
+  const filteredIssues = allowedIssueNumbers
+    ? issues.filter((issue) => allowedIssueNumbers.has(issue.number))
+    : issues;
+  const filteredPullRequests = allowedIssueNumbers
+    ? linkedPullRequests.filter((record) => record.linkedIssueNumbers.every((issueNumber) => allowedIssueNumbers.has(issueNumber)))
+    : linkedPullRequests;
 
   const issueNodes = new Map<number, GraphIssueNode>();
   const pullRequestNodes = new Map<number, GraphPullRequestNode>();
@@ -96,7 +132,7 @@ function main() {
     relationships.push(relationship);
   }
 
-  for (const issue of issues) {
+  for (const issue of filteredIssues) {
     issueNodes.set(issue.number, normalizeIssue(issue));
 
     for (const label of issue.labels) {
@@ -118,7 +154,7 @@ function main() {
     }
   }
 
-  for (const record of linkedPullRequests) {
+  for (const record of filteredPullRequests) {
     pullRequestNodes.set(record.pullRequest.number, normalizePullRequest(record));
 
     if (record.pullRequest.user?.login) {
@@ -175,6 +211,7 @@ function main() {
   saveGraphDataset(dataset);
 
   logInfo("Graph normalization complete", {
+    holdoutMode: args.holdout || "full",
     issueCount: dataset.issues.length,
     pullRequestCount: dataset.pullRequests.length,
     fileCount: dataset.files.length,

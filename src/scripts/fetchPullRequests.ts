@@ -1,19 +1,22 @@
 import fs from "node:fs";
 import path from "node:path";
-import { loadEnv } from "../config/env.js";
+import { loadGitHubEnv } from "../config/env.js";
 import { loadCheckpoint, saveCheckpoint } from "../lib/checkpoint.js";
 import { createGitHubClient } from "../lib/github.js";
 import { logInfo } from "../lib/logger.js";
 import type {
   GitHubIssue,
   GitHubPullRequest,
+  GitHubTimelineCrossReferenceEvent,
   LinkedPullRequestRecord,
+  PullRequestCommit,
   PullRequestFile
 } from "../lib/types.js";
 
 type PullRequestCheckpoint = {
   page: number;
   linkedPullRequestCount: number;
+  timelineIssueIndex?: number;
 };
 
 const ISSUES_PATH = path.resolve(process.cwd(), "data", "raw", "issues", "issues.json");
@@ -21,7 +24,9 @@ const OUTPUT_PATH = path.resolve(process.cwd(), "data", "raw", "pullRequests", "
 const CHECKPOINT_NAME = "fetchPullRequests";
 const PER_PAGE = 100;
 const MAX_PR_PAGES = 20;
-const ISSUE_LINK_REGEX = /\b(?:fixes|fixed|fix|closes|closed|close|resolves|resolved|resolve)\s+#(\d+)\b/gi;
+const TIMELINE_SAVE_INTERVAL = 25;
+const ISSUE_LINK_REGEX =
+  /\b(?:fixes|fixed|fix|closes|closed|close|resolves|resolved|resolve)\s+(?:https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/issues\/|[\w.-]+\/[\w.-]+#|#)(\d+)\b/gi;
 
 function ensureOutputDirectory(): void {
   fs.mkdirSync(path.dirname(OUTPUT_PATH), { recursive: true });
@@ -100,15 +105,127 @@ async function fetchPullRequestFiles(
   return files;
 }
 
+async function fetchPullRequestByNumber(
+  github: ReturnType<typeof createGitHubClient>,
+  owner: string,
+  repo: string,
+  pullRequestNumber: number
+): Promise<GitHubPullRequest> {
+  return github.get<GitHubPullRequest>(`/repos/${owner}/${repo}/pulls/${pullRequestNumber}`);
+}
+
+async function fetchPullRequestCommits(
+  github: ReturnType<typeof createGitHubClient>,
+  owner: string,
+  repo: string,
+  pullRequestNumber: number
+): Promise<PullRequestCommit[]> {
+  const commits: PullRequestCommit[] = [];
+  let page = 1;
+
+  while (true) {
+    const pageCommits = await github.get<PullRequestCommit[]>(
+      `/repos/${owner}/${repo}/pulls/${pullRequestNumber}/commits`,
+      {
+        query: {
+          per_page: PER_PAGE,
+          page
+        }
+      }
+    );
+
+    if (pageCommits.length === 0) {
+      break;
+    }
+
+    commits.push(...pageCommits);
+
+    if (pageCommits.length < PER_PAGE) {
+      break;
+    }
+
+    page += 1;
+  }
+
+  return commits;
+}
+
+async function fetchIssueTimelinePullRequestNumbers(
+  github: ReturnType<typeof createGitHubClient>,
+  owner: string,
+  repo: string,
+  issueNumber: number
+): Promise<number[]> {
+  const events = await github.get<GitHubTimelineCrossReferenceEvent[]>(
+    `/repos/${owner}/${repo}/issues/${issueNumber}/timeline`,
+    {
+      query: {
+        per_page: 100
+      },
+      headers: {
+        Accept: "application/vnd.github+json"
+      }
+    }
+  );
+  const pullRequestNumbers = new Set<number>();
+
+  for (const event of events) {
+    if (event.event !== "cross-referenced") {
+      continue;
+    }
+
+    const referencedIssue = event.source?.issue;
+
+    if (!referencedIssue?.pull_request?.url || typeof referencedIssue.number !== "number") {
+      continue;
+    }
+
+    if (!referencedIssue.pull_request.url.includes(`/repos/${owner}/${repo}/pulls/`)) {
+      continue;
+    }
+
+    pullRequestNumbers.add(referencedIssue.number);
+  }
+
+  return Array.from(pullRequestNumbers.values()).sort((a, b) => a - b);
+}
+
+async function hydrateLinkedPullRequest(
+  github: ReturnType<typeof createGitHubClient>,
+  owner: string,
+  repo: string,
+  pullRequestNumber: number,
+  linkedIssueNumbers: number[]
+): Promise<LinkedPullRequestRecord> {
+  const pullRequest = await fetchPullRequestByNumber(github, owner, repo, pullRequestNumber);
+  const files = await fetchPullRequestFiles(github, owner, repo, pullRequestNumber);
+  const commits = await fetchPullRequestCommits(github, owner, repo, pullRequestNumber);
+
+  return {
+    pullRequest,
+    linkedIssueNumbers,
+    files,
+    commits
+  };
+}
+
+function mergeLinkedIssueNumbers(record: LinkedPullRequestRecord, linkedIssueNumbers: number[]): LinkedPullRequestRecord {
+  return {
+    ...record,
+    linkedIssueNumbers: Array.from(new Set([...record.linkedIssueNumbers, ...linkedIssueNumbers])).sort((a, b) => a - b)
+  };
+}
+
 async function main() {
-  const env = loadEnv();
+  const env = loadGitHubEnv();
   const github = createGitHubClient();
   const issues = loadIssues();
   const issueNumbers = new Set<number>(issues.map((issue) => issue.number));
   const existingRecords = loadExistingLinkedPullRequests();
   const checkpoint = loadCheckpoint<PullRequestCheckpoint>(CHECKPOINT_NAME) ?? {
     page: 1,
-    linkedPullRequestCount: existingRecords.length
+    linkedPullRequestCount: existingRecords.length,
+    timelineIssueIndex: 0
   };
 
   const linkedPullRequestMap = new Map<number, LinkedPullRequestRecord>(
@@ -151,8 +268,23 @@ async function main() {
         continue;
       }
 
-      const searchableText = `${pullRequest.title}\n${pullRequest.body ?? ""}`;
-      const linkedIssueNumbers = extractLinkedIssueNumbers(searchableText, issueNumbers);
+      const prText = `${pullRequest.title}\n\n${pullRequest.body ?? ""}`;
+      let linkedIssueNumbers = extractLinkedIssueNumbers(prText, issueNumbers);
+      let commits: PullRequestCommit[] | undefined;
+
+      if (linkedIssueNumbers.length === 0) {
+        commits = await fetchPullRequestCommits(
+          github,
+          env.GITHUB_OWNER,
+          env.GITHUB_REPO,
+          pullRequest.number
+        );
+
+        linkedIssueNumbers = extractLinkedIssueNumbers(
+          commits.map((commit) => commit.commit.message).join("\n\n"),
+          issueNumbers
+        );
+      }
 
       if (linkedIssueNumbers.length === 0) {
         continue;
@@ -168,7 +300,8 @@ async function main() {
       linkedPullRequestMap.set(pullRequest.number, {
         pullRequest,
         linkedIssueNumbers,
-        files
+        files,
+        commits
       });
 
       linkedThisPage += 1;
@@ -178,7 +311,8 @@ async function main() {
     currentPage += 1;
     saveCheckpoint(CHECKPOINT_NAME, {
       page: currentPage,
-      linkedPullRequestCount: linkedPullRequestMap.size
+      linkedPullRequestCount: linkedPullRequestMap.size,
+      timelineIssueIndex: checkpoint.timelineIssueIndex ?? 0
     });
 
     logInfo("Processed pull request page", {
@@ -188,8 +322,95 @@ async function main() {
     });
   }
 
+  const linkedIssueNumbers = new Set<number>(
+    Array.from(linkedPullRequestMap.values()).flatMap((record) => record.linkedIssueNumbers)
+  );
+  let timelineIssueIndex = checkpoint.timelineIssueIndex ?? 0;
+  let timelineLinkedCount = 0;
+
+  while (timelineIssueIndex < issues.length) {
+    const issue = issues[timelineIssueIndex];
+    timelineIssueIndex += 1;
+
+    if (linkedIssueNumbers.has(issue.number)) {
+      if (timelineIssueIndex % TIMELINE_SAVE_INTERVAL === 0) {
+        saveCheckpoint(CHECKPOINT_NAME, {
+          page: currentPage,
+          linkedPullRequestCount: linkedPullRequestMap.size,
+          timelineIssueIndex
+        });
+      }
+      continue;
+    }
+
+    const timelinePrNumbers = await fetchIssueTimelinePullRequestNumbers(
+      github,
+      env.GITHUB_OWNER,
+      env.GITHUB_REPO,
+      issue.number
+    );
+
+    if (timelinePrNumbers.length > 0) {
+      for (const pullRequestNumber of timelinePrNumbers) {
+        const existingRecord = linkedPullRequestMap.get(pullRequestNumber);
+
+        if (existingRecord) {
+          linkedPullRequestMap.set(
+            pullRequestNumber,
+            mergeLinkedIssueNumbers(existingRecord, [issue.number])
+          );
+        } else {
+          try {
+            const hydratedRecord = await hydrateLinkedPullRequest(
+              github,
+              env.GITHUB_OWNER,
+              env.GITHUB_REPO,
+              pullRequestNumber,
+              [issue.number]
+            );
+            linkedPullRequestMap.set(pullRequestNumber, hydratedRecord);
+          } catch (error) {
+            logInfo("Skipping invalid timeline-linked pull request", {
+              issueNumber: issue.number,
+              pullRequestNumber,
+              message: error instanceof Error ? error.message : "Unknown error"
+            });
+            continue;
+          }
+        }
+      }
+
+      linkedIssueNumbers.add(issue.number);
+      timelineLinkedCount += 1;
+      saveLinkedPullRequests(Array.from(linkedPullRequestMap.values()));
+    }
+
+    if (timelineIssueIndex % TIMELINE_SAVE_INTERVAL === 0) {
+      saveCheckpoint(CHECKPOINT_NAME, {
+        page: currentPage,
+        linkedPullRequestCount: linkedPullRequestMap.size,
+        timelineIssueIndex
+      });
+
+      logInfo("Processed issue timeline batch", {
+        scannedIssueCount: timelineIssueIndex,
+        linkedPullRequestsStored: linkedPullRequestMap.size,
+        timelineLinkedCount
+      });
+    }
+  }
+
+  saveLinkedPullRequests(Array.from(linkedPullRequestMap.values()));
+  saveCheckpoint(CHECKPOINT_NAME, {
+    page: currentPage,
+    linkedPullRequestCount: linkedPullRequestMap.size,
+    timelineIssueIndex
+  });
+
   logInfo("Pull request fetch complete", {
     totalLinkedPullRequestsStored: linkedPullRequestMap.size,
+    timelineIssueIndex,
+    timelineLinkedCount,
     outputPath: OUTPUT_PATH
   });
 }
