@@ -30,6 +30,27 @@ type HoldoutEvaluationReport = {
   broad_focused_file_recall_at_5: number;
   broad_pr_component_accuracy: number;
   component_aligned_file_hit_rate: number;
+  per_component: Record<
+    string,
+    {
+      case_count: number;
+      top1_accuracy: number;
+      top3_accuracy: number;
+      component_aligned_file_hit_rate: number;
+    }
+  >;
+  confusion_matrix: Array<{
+    expected_component: string;
+    predicted_component: string;
+    count: number;
+    sample_issue_numbers: number[];
+  }>;
+  dominant_misroutes: Array<{
+    expected_component: string;
+    predicted_component: string;
+    count: number;
+    sample_issue_numbers: number[];
+  }>;
   failures: Array<{
     issue_number: number;
     expected_component: string;
@@ -161,6 +182,11 @@ async function main() {
   let broadFocusedFileRecallAt5Total = 0;
   let broadPrComponentCorrect = 0;
   let componentAlignedFileHitCount = 0;
+  const perComponentStats = new Map<
+    string,
+    { caseCount: number; top1Correct: number; top3Correct: number; componentAlignedHitCount: number }
+  >();
+  const confusionStats = new Map<string, { expectedComponent: string; predictedComponent: string; count: number; sampleIssueNumbers: number[] }>();
   const failures: Array<{
     issue_number: number;
     expected_component: string;
@@ -195,18 +221,30 @@ async function main() {
     const componentAlignedHit = recommendation.likely_impacted_files.some(
       (file) => file.component === benchmarkCase.expected.component
     );
+    const isTop3Correct =
+      top3Components.includes(benchmarkCase.expected.component) || predictedComponent === benchmarkCase.expected.component;
     const isBroadPrCase = expectedFiles.length > 10;
+    const componentStats = perComponentStats.get(benchmarkCase.expected.component) || {
+      caseCount: 0,
+      top1Correct: 0,
+      top3Correct: 0,
+      componentAlignedHitCount: 0
+    };
+
+    componentStats.caseCount += 1;
 
     if (predictedComponent === benchmarkCase.expected.component) {
       componentCorrect += 1;
+      componentStats.top1Correct += 1;
     }
 
     if (recommendation.similar_tickets.length > 0) {
       top1SupportExists += 1;
     }
 
-    if (top3Components.includes(benchmarkCase.expected.component) || predictedComponent === benchmarkCase.expected.component) {
+    if (isTop3Correct) {
       componentTop3Correct += 1;
+      componentStats.top3Correct += 1;
     }
 
     if (predictedComponent === "Unknown") {
@@ -223,7 +261,26 @@ async function main() {
 
     if (componentAlignedHit) {
       componentAlignedFileHitCount += 1;
+      componentStats.componentAlignedHitCount += 1;
     }
+
+    perComponentStats.set(benchmarkCase.expected.component, componentStats);
+
+    const confusionKey = `${benchmarkCase.expected.component}=>${predictedComponent}`;
+    const confusionRow = confusionStats.get(confusionKey) || {
+      expectedComponent: benchmarkCase.expected.component,
+      predictedComponent,
+      count: 0,
+      sampleIssueNumbers: []
+    };
+
+    confusionRow.count += 1;
+
+    if (confusionRow.sampleIssueNumbers.length < 5) {
+      confusionRow.sampleIssueNumbers.push(benchmarkCase.issue_number);
+    }
+
+    confusionStats.set(confusionKey, confusionRow);
 
     fileRecallAt5Total += fileRecallAt5;
     fileRecallAt10Total += fileRecallAt10;
@@ -256,6 +313,36 @@ async function main() {
     }
   }
 
+  const perComponent = Object.fromEntries(
+    Array.from(perComponentStats.entries())
+      .sort((left, right) => left[0].localeCompare(right[0]))
+      .map(([component, stats]) => [
+        component,
+        {
+          case_count: stats.caseCount,
+          top1_accuracy: Number((stats.top1Correct / stats.caseCount).toFixed(3)),
+          top3_accuracy: Number((stats.top3Correct / stats.caseCount).toFixed(3)),
+          component_aligned_file_hit_rate: Number((stats.componentAlignedHitCount / stats.caseCount).toFixed(3))
+        }
+      ])
+  );
+
+  const confusionMatrix = Array.from(confusionStats.values()).sort(
+    (left, right) =>
+      right.count - left.count ||
+      left.expectedComponent.localeCompare(right.expectedComponent) ||
+      left.predictedComponent.localeCompare(right.predictedComponent)
+  ).map((row) => ({
+    expected_component: row.expectedComponent,
+    predicted_component: row.predictedComponent,
+    count: row.count,
+    sample_issue_numbers: row.sampleIssueNumbers
+  }));
+
+  const dominantMisroutes = confusionMatrix
+    .filter((row) => row.expected_component !== row.predicted_component)
+    .slice(0, 15);
+
   const report: HoldoutEvaluationReport = {
     evaluated_cases: cases.length,
     component_accuracy: Number((componentCorrect / cases.length).toFixed(3)),
@@ -278,6 +365,9 @@ async function main() {
     broad_pr_component_accuracy:
       broadPrCaseCount > 0 ? Number((broadPrComponentCorrect / broadPrCaseCount).toFixed(3)) : 0,
     component_aligned_file_hit_rate: Number((componentAlignedFileHitCount / cases.length).toFixed(3)),
+    per_component: perComponent,
+    confusion_matrix: confusionMatrix,
+    dominant_misroutes: dominantMisroutes,
     failures,
     train_issue_count: holdoutSplit.metadata.train_case_count,
     test_issue_count: holdoutSplit.metadata.test_case_count,
