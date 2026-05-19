@@ -49,7 +49,7 @@ async function main() {
   const output = await generateRecommendation({
     title: args.title,
     description: args.description,
-    topK: args.topK
+    topK: args.topK,
   });
 
   console.log(JSON.stringify(output, null, 2));

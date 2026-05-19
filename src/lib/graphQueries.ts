@@ -35,11 +35,16 @@ function getStringArray(value: unknown): string[] {
   }
 
   return value
-    .filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+    .filter(
+      (entry): entry is string =>
+        typeof entry === "string" && entry.trim().length > 0,
+    )
     .sort((a, b) => a.localeCompare(b));
 }
 
-export async function fetchIssueEvidence(issueNumber: number): Promise<QueryIssueResult | null> {
+export async function fetchIssueEvidence(
+  issueNumber: number,
+): Promise<QueryIssueResult | null> {
   const neo4jClient = createNeo4jClient();
   const session = neo4jClient.getSession();
 
@@ -69,7 +74,7 @@ export async function fetchIssueEvidence(issueNumber: number): Promise<QueryIssu
                collect(DISTINCT author.login) AS authors
         ORDER BY pullRequestNumber ASC, filePath ASC
       `,
-      { issueNumber }
+      { issueNumber },
     );
 
     if (result.records.length === 0) {
@@ -84,14 +89,24 @@ export async function fetchIssueEvidence(issueNumber: number): Promise<QueryIssu
       labels: getStringArray(record.get("labels")),
       assignees: getStringArray(record.get("assignees")),
       pullRequestNumber:
-        record.get("pullRequestNumber") === null ? null : toNumber(record.get("pullRequestNumber")),
+        record.get("pullRequestNumber") === null
+          ? null
+          : toNumber(record.get("pullRequestNumber")),
       pullRequestTitle:
-        record.get("pullRequestTitle") === null ? null : String(record.get("pullRequestTitle")),
-      pullRequestUrl: record.get("pullRequestUrl") === null ? null : String(record.get("pullRequestUrl")),
-      filePath: record.get("filePath") === null ? null : String(record.get("filePath")),
+        record.get("pullRequestTitle") === null
+          ? null
+          : String(record.get("pullRequestTitle")),
+      pullRequestUrl:
+        record.get("pullRequestUrl") === null
+          ? null
+          : String(record.get("pullRequestUrl")),
+      filePath:
+        record.get("filePath") === null ? null : String(record.get("filePath")),
       componentName:
-        record.get("componentName") === null ? null : String(record.get("componentName")),
-      authors: getStringArray(record.get("authors"))
+        record.get("componentName") === null
+          ? null
+          : String(record.get("componentName")),
+      authors: getStringArray(record.get("authors")),
     }));
 
     const issue: IssueSummary = {
@@ -100,7 +115,7 @@ export async function fetchIssueEvidence(issueNumber: number): Promise<QueryIssu
       url: rows[0].issueUrl,
       state: rows[0].issueState,
       labels: rows[0].labels,
-      assignees: rows[0].assignees
+      assignees: rows[0].assignees,
     };
 
     const pullRequestMap = new Map<
@@ -113,11 +128,18 @@ export async function fetchIssueEvidence(issueNumber: number): Promise<QueryIssu
         changedFiles: Array<{ path: string; component: string }>;
       }
     >();
-    const fileMap = new Map<string, { path: string; component: string; linkedPullRequests: number[] }>();
+    const fileMap = new Map<
+      string,
+      { path: string; component: string; linkedPullRequests: number[] }
+    >();
     const evidencePaths: string[][] = [];
 
     for (const row of rows) {
-      if (row.pullRequestNumber === null || row.pullRequestTitle === null || row.pullRequestUrl === null) {
+      if (
+        row.pullRequestNumber === null ||
+        row.pullRequestTitle === null ||
+        row.pullRequestUrl === null
+      ) {
         continue;
       }
 
@@ -127,17 +149,20 @@ export async function fetchIssueEvidence(issueNumber: number): Promise<QueryIssu
           title: row.pullRequestTitle,
           url: row.pullRequestUrl,
           authors: row.authors,
-          changedFiles: []
+          changedFiles: [],
         });
       }
 
       if (row.filePath && row.componentName) {
         const pullRequest = pullRequestMap.get(row.pullRequestNumber);
 
-        if (pullRequest && !pullRequest.changedFiles.some((file) => file.path === row.filePath)) {
+        if (
+          pullRequest &&
+          !pullRequest.changedFiles.some((file) => file.path === row.filePath)
+        ) {
           pullRequest.changedFiles.push({
             path: row.filePath,
-            component: row.componentName
+            component: row.componentName,
           });
         }
 
@@ -147,9 +172,11 @@ export async function fetchIssueEvidence(issueNumber: number): Promise<QueryIssu
           fileMap.set(row.filePath, {
             path: row.filePath,
             component: row.componentName,
-            linkedPullRequests: [row.pullRequestNumber]
+            linkedPullRequests: [row.pullRequestNumber],
           });
-        } else if (!existingFile.linkedPullRequests.includes(row.pullRequestNumber)) {
+        } else if (
+          !existingFile.linkedPullRequests.includes(row.pullRequestNumber)
+        ) {
           existingFile.linkedPullRequests.push(row.pullRequestNumber);
         }
 
@@ -157,16 +184,20 @@ export async function fetchIssueEvidence(issueNumber: number): Promise<QueryIssu
           `Issue #${row.issueNumber}: ${row.issueTitle}`,
           `FIXED_BY PR #${row.pullRequestNumber}: ${row.pullRequestTitle}`,
           `CHANGES ${row.filePath}`,
-          `BELONGS_TO ${row.componentName}`
+          `BELONGS_TO ${row.componentName}`,
         ]);
       }
     }
 
     return {
       issue,
-      linkedPullRequests: Array.from(pullRequestMap.values()).sort((a, b) => a.number - b.number),
-      likelyFiles: Array.from(fileMap.values()).sort((a, b) => a.path.localeCompare(b.path)),
-      evidencePaths
+      linkedPullRequests: Array.from(pullRequestMap.values()).sort(
+        (a, b) => a.number - b.number,
+      ),
+      likelyFiles: Array.from(fileMap.values()).sort((a, b) =>
+        a.path.localeCompare(b.path),
+      ),
+      evidencePaths,
     };
   } finally {
     await session.close();
@@ -174,7 +205,10 @@ export async function fetchIssueEvidence(issueNumber: number): Promise<QueryIssu
   }
 }
 
-export async function searchIssuesByTitle(queryText: string, limit: number): Promise<number[]> {
+export async function searchIssuesByTitle(
+  queryText: string,
+  limit: number,
+): Promise<number[]> {
   const neo4jClient = createNeo4jClient();
   const session = neo4jClient.getSession();
 
@@ -187,8 +221,8 @@ export async function searchIssuesByTitle(queryText: string, limit: number): Pro
           .toLowerCase()
           .split(/\s+/)
           .map((token) => token.trim())
-          .filter((token) => token.length >= 3)
-      )
+          .filter((token) => token.length >= 3),
+      ),
     );
 
     if (tokens.length === 0) {
@@ -211,7 +245,7 @@ export async function searchIssuesByTitle(queryText: string, limit: number): Pro
         ORDER BY score DESC, issue.updatedAt DESC
         LIMIT $limit
       `,
-      { tokens, limit: neo4j.int(limit) }
+      { tokens, limit: neo4j.int(limit) },
     );
 
     return result.records.map((record) => toNumber(record.get("issueNumber")));

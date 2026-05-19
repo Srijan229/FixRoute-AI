@@ -12,7 +12,13 @@ type IssuesCheckpoint = {
 };
 
 const CHECKPOINT_NAME = "fetchIssues";
-const OUTPUT_PATH = path.resolve(process.cwd(), "data", "raw", "issues", "issues.json");
+const OUTPUT_PATH = path.resolve(
+  process.cwd(),
+  "data",
+  "raw",
+  "issues",
+  "issues.json",
+);
 const PER_PAGE = 100;
 
 function ensureOutputDirectory(): void {
@@ -43,10 +49,12 @@ async function main() {
   const existingIssues = loadExistingIssues();
   const checkpoint = loadCheckpoint<IssuesCheckpoint>(CHECKPOINT_NAME) ?? {
     page: 1,
-    fetchedCount: existingIssues.length
+    fetchedCount: existingIssues.length,
   };
 
-  const issueMap = new Map<number, GitHubIssue>(existingIssues.map((issue) => [issue.number, issue]));
+  const issueMap = new Map<number, GitHubIssue>(
+    existingIssues.map((issue) => [issue.number, issue]),
+  );
   let currentPage = checkpoint.page;
   let fetchedCount = checkpoint.fetchedCount;
 
@@ -55,7 +63,7 @@ async function main() {
     repo: env.GITHUB_REPO,
     issueFetchLimit: env.ISSUE_FETCH_LIMIT,
     startingPage: currentPage,
-    existingIssues: issueMap.size
+    existingIssues: issueMap.size,
   });
 
   while (fetchedCount < env.ISSUE_FETCH_LIMIT) {
@@ -67,9 +75,9 @@ async function main() {
           sort: "updated",
           direction: "desc",
           per_page: PER_PAGE,
-          page: currentPage
-        }
-      }
+          page: currentPage,
+        },
+      },
     );
 
     if (pageIssues.length === 0) {
@@ -104,13 +112,13 @@ async function main() {
     logInfo("Processed issue page", {
       currentPage: currentPage - 1,
       fetchedCount,
-      addedThisPage
+      addedThisPage,
     });
   }
 
   logInfo("Issue fetch complete", {
     totalIssuesStored: issueMap.size,
-    outputPath: OUTPUT_PATH
+    outputPath: OUTPUT_PATH,
   });
 }
 

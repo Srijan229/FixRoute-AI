@@ -1,4 +1,7 @@
-import { fetchIssueEvidence, searchIssuesByTitle } from "../lib/graphQueries.js";
+import {
+  fetchIssueEvidence,
+  searchIssuesByTitle,
+} from "../lib/graphQueries.js";
 import type { QueryIssueResult } from "../lib/types.js";
 
 type QueryArgs = {
@@ -54,7 +57,13 @@ async function main() {
     const result = await fetchIssueEvidence(args.issueNumber);
 
     if (!result) {
-      console.log(JSON.stringify({ message: `Issue #${args.issueNumber} not found in graph` }, null, 2));
+      console.log(
+        JSON.stringify(
+          { message: `Issue #${args.issueNumber} not found in graph` },
+          null,
+          2,
+        ),
+      );
       return;
     }
 
@@ -63,18 +72,22 @@ async function main() {
   }
 
   const issueNumbers = await searchIssuesByTitle(args.title!, args.limit);
-  const results = await Promise.all(issueNumbers.map((issueNumber) => fetchIssueEvidence(issueNumber)));
+  const results = await Promise.all(
+    issueNumbers.map((issueNumber) => fetchIssueEvidence(issueNumber)),
+  );
 
   console.log(
     JSON.stringify(
       {
         query: args.title,
         matchCount: results.filter((result) => result !== null).length,
-        matches: results.filter((result): result is QueryIssueResult => result !== null)
+        matches: results.filter(
+          (result): result is QueryIssueResult => result !== null,
+        ),
       },
       null,
-      2
-    )
+      2,
+    ),
   );
 }
 

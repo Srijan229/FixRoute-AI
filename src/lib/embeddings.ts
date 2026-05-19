@@ -1,7 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import { loadSemanticEnv } from "../config/env.js";
-import type { GitHubIssue, IssueEmbeddingRecord } from "./types.js";
+import type {
+  GitHubIssue,
+  IssueEmbeddingRecord,
+  RichSemanticIndex,
+} from "./types.js";
 
 type EmbeddingProvider = {
   embedBatch: (texts: string[]) => Promise<number[][]>;
@@ -11,11 +15,15 @@ type EmbeddingProvider = {
 const TOKEN_REGEX = /[a-z0-9_./-]+/g;
 
 function tokenize(text: string): string[] {
-  return (text.toLowerCase().match(TOKEN_REGEX) || []).filter((token) => token.length >= 2);
+  return (text.toLowerCase().match(TOKEN_REGEX) || []).filter(
+    (token) => token.length >= 2,
+  );
 }
 
 function normalizeVector(vector: number[]): number[] {
-  const magnitude = Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0));
+  const magnitude = Math.sqrt(
+    vector.reduce((sum, value) => sum + value * value, 0),
+  );
 
   if (magnitude === 0) {
     return vector;
@@ -54,24 +62,26 @@ async function embedWithGemini(texts: string[]): Promise<number[][]> {
     {
       method: "POST",
       headers: {
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
       },
       body: JSON.stringify({
         requests: texts.map((text) => ({
           model: `models/${env.EMBEDDING_MODEL}`,
           content: {
-            parts: [{ text }]
+            parts: [{ text }],
           },
           outputDimensionality: env.EMBEDDING_DIMENSION,
-          taskType: "RETRIEVAL_DOCUMENT"
-        }))
-      })
-    }
+          taskType: "RETRIEVAL_DOCUMENT",
+        })),
+      }),
+    },
   );
 
   if (!response.ok) {
     const body = await response.text();
-    throw new Error(`Gemini embedding request failed: ${response.status} ${response.statusText} ${body}`);
+    throw new Error(
+      `Gemini embedding request failed: ${response.status} ${response.statusText} ${body}`,
+    );
   }
 
   const payload = (await response.json()) as {
@@ -82,7 +92,9 @@ async function embedWithGemini(texts: string[]): Promise<number[][]> {
     throw new Error("Gemini embedding response shape was unexpected");
   }
 
-  return payload.embeddings.map((embedding) => normalizeVector(embedding.values || []));
+  return payload.embeddings.map((embedding) =>
+    normalizeVector(embedding.values || []),
+  );
 }
 
 export function createEmbeddingProvider(): EmbeddingProvider {
@@ -91,14 +103,15 @@ export function createEmbeddingProvider(): EmbeddingProvider {
   if (env.EMBEDDING_PROVIDER === "gemini") {
     return {
       embedBatch: embedWithGemini,
-      embedOne: async (text: string) => (await embedWithGemini([text]))[0]
+      embedOne: async (text: string) => (await embedWithGemini([text]))[0],
     };
   }
 
   return {
     embedBatch: async (texts: string[]) =>
       texts.map((text) => createLocalEmbedding(text, env.EMBEDDING_DIMENSION)),
-    embedOne: async (text: string) => createLocalEmbedding(text, env.EMBEDDING_DIMENSION)
+    embedOne: async (text: string) =>
+      createLocalEmbedding(text, env.EMBEDDING_DIMENSION),
   };
 }
 
@@ -115,6 +128,14 @@ export function getEmbeddingsFilePath(): string {
   return path.resolve(process.cwd(), loadSemanticEnv().EMBEDDINGS_FILE_PATH);
 }
 
+export function getRichSemanticIndexFilePath(): string {
+  return path.resolve(
+    process.cwd(),
+    process.env.RICH_SEMANTIC_INDEX_FILE_PATH ||
+      "data/processed/semantic/richSemanticIndex.json",
+  );
+}
+
 export function saveEmbeddingIndex(records: IssueEmbeddingRecord[]): void {
   const outputPath = getEmbeddingsFilePath();
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
@@ -128,7 +149,27 @@ export function loadEmbeddingIndex(): IssueEmbeddingRecord[] {
     throw new Error("Missing embedding index. Run create:embeddings first.");
   }
 
-  return JSON.parse(fs.readFileSync(inputPath, "utf8")) as IssueEmbeddingRecord[];
+  return JSON.parse(
+    fs.readFileSync(inputPath, "utf8"),
+  ) as IssueEmbeddingRecord[];
+}
+
+export function saveRichSemanticIndex(index: RichSemanticIndex): void {
+  const outputPath = getRichSemanticIndexFilePath();
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+  fs.writeFileSync(outputPath, JSON.stringify(index, null, 2), "utf8");
+}
+
+export function loadRichSemanticIndex(): RichSemanticIndex {
+  const inputPath = getRichSemanticIndexFilePath();
+
+  if (!fs.existsSync(inputPath)) {
+    throw new Error(
+      "Missing rich semantic index. Run create:rich-semantic-index first.",
+    );
+  }
+
+  return JSON.parse(fs.readFileSync(inputPath, "utf8")) as RichSemanticIndex;
 }
 
 export function cosineSimilarity(left: number[], right: number[]): number {

@@ -9,14 +9,20 @@ type RecommendationRequestBody = {
 
 const PORT = Number(process.env.PORT || 3001);
 
-function sendJson(response: http.ServerResponse, statusCode: number, payload: unknown): void {
+function sendJson(
+  response: http.ServerResponse,
+  statusCode: number,
+  payload: unknown,
+): void {
   response.writeHead(statusCode, {
-    "Content-Type": "application/json"
+    "Content-Type": "application/json",
   });
   response.end(JSON.stringify(payload, null, 2));
 }
 
-function readJsonBody(request: http.IncomingMessage): Promise<RecommendationRequestBody> {
+function readJsonBody(
+  request: http.IncomingMessage,
+): Promise<RecommendationRequestBody> {
   return new Promise((resolve, reject) => {
     let rawBody = "";
 
@@ -53,7 +59,7 @@ const server = http.createServer(async (request, response) => {
       const recommendation = await generateRecommendation({
         title: body.title || "",
         description: body.description || "",
-        topK: body.topK
+        topK: body.topK,
       });
 
       sendJson(response, 200, recommendation);
@@ -62,7 +68,8 @@ const server = http.createServer(async (request, response) => {
 
     sendJson(response, 404, { error: "Not found" });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Unknown server error";
+    const message =
+      error instanceof Error ? error.message : "Unknown server error";
     sendJson(response, 400, { error: message });
   }
 });

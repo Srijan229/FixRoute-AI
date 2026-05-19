@@ -27,7 +27,10 @@ function toNumber(value: unknown): number {
   throw new Error("Unable to convert Neo4j numeric value");
 }
 
-async function getNodeCount(sessionQuery: (query: string) => Promise<CountRow>, label: string) {
+async function getNodeCount(
+  sessionQuery: (query: string) => Promise<CountRow>,
+  label: string,
+) {
   return sessionQuery(`MATCH (n:${label}) RETURN count(n) AS count`);
 }
 
@@ -44,7 +47,7 @@ async function main() {
     }
 
     return {
-      count: toNumber(firstRecord.get("count"))
+      count: toNumber(firstRecord.get("count")),
     };
   }
 
@@ -57,7 +60,9 @@ async function main() {
       files: await getNodeCount(runCountQuery, "File"),
       components: await getNodeCount(runCountQuery, "Component"),
       labels: await getNodeCount(runCountQuery, "Label"),
-      developers: await getNodeCount(runCountQuery, "Developer")
+      developers: await getNodeCount(runCountQuery, "Developer"),
+      issueComments: await getNodeCount(runCountQuery, "IssueComment"),
+      patchHunks: await getNodeCount(runCountQuery, "PatchHunk"),
     };
 
     logInfo("Graph node counts", {
@@ -66,7 +71,9 @@ async function main() {
       files: counts.files.count,
       components: counts.components.count,
       labels: counts.labels.count,
-      developers: counts.developers.count
+      developers: counts.developers.count,
+      issueComments: counts.issueComments.count,
+      patchHunks: counts.patchHunks.count,
     });
 
     const relationshipCountsResult = await session.run(`
@@ -75,13 +82,15 @@ async function main() {
       ORDER BY relationshipType
     `);
 
-    const relationshipCounts = relationshipCountsResult.records.map((record) => ({
-      relationshipType: String(record.get("relationshipType")),
-      count: toNumber(record.get("count"))
-    }));
+    const relationshipCounts = relationshipCountsResult.records.map(
+      (record) => ({
+        relationshipType: String(record.get("relationshipType")),
+        count: toNumber(record.get("count")),
+      }),
+    );
 
     logInfo("Graph relationship counts", {
-      relationshipCounts
+      relationshipCounts,
     });
 
     const evidencePathResult = await session.run(`
@@ -96,22 +105,24 @@ async function main() {
       LIMIT 5
     `);
 
-    const evidencePaths: EvidencePathRow[] = evidencePathResult.records.map((record) => ({
-      issueNumber: toNumber(record.get("issueNumber")),
-      issueTitle: String(record.get("issueTitle")),
-      pullRequestNumber: toNumber(record.get("pullRequestNumber")),
-      pullRequestTitle: String(record.get("pullRequestTitle")),
-      filePath: String(record.get("filePath")),
-      componentName: String(record.get("componentName"))
-    }));
+    const evidencePaths: EvidencePathRow[] = evidencePathResult.records.map(
+      (record) => ({
+        issueNumber: toNumber(record.get("issueNumber")),
+        issueTitle: String(record.get("issueTitle")),
+        pullRequestNumber: toNumber(record.get("pullRequestNumber")),
+        pullRequestTitle: String(record.get("pullRequestTitle")),
+        filePath: String(record.get("filePath")),
+        componentName: String(record.get("componentName")),
+      }),
+    );
 
     logInfo("Sample evidence paths", {
       evidencePaths: evidencePaths.map((pathRow) => [
         `Issue #${pathRow.issueNumber}: ${pathRow.issueTitle}`,
         `FIXED_BY PR #${pathRow.pullRequestNumber}: ${pathRow.pullRequestTitle}`,
         `CHANGES ${pathRow.filePath}`,
-        `BELONGS_TO ${pathRow.componentName}`
-      ])
+        `BELONGS_TO ${pathRow.componentName}`,
+      ]),
     });
   } finally {
     await session.close();

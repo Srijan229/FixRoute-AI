@@ -5,7 +5,13 @@ import { generateRecommendation } from "../lib/recommendation.js";
 import { logInfo } from "../lib/logger.js";
 import type { BenchmarkCase, HoldoutSplit } from "../lib/types.js";
 
-const HOLDOUT_PATH = path.resolve(process.cwd(), "data", "processed", "evaluation", "holdout.json");
+const HOLDOUT_PATH = path.resolve(
+  process.cwd(),
+  "data",
+  "processed",
+  "evaluation",
+  "holdout.json",
+);
 
 type Args = {
   limit?: number;
@@ -95,7 +101,10 @@ function unique<T>(items: T[]): T[] {
   return Array.from(new Set(items));
 }
 
-function filePriorityScore(filePath: string, expectedComponent: string): number {
+function filePriorityScore(
+  filePath: string,
+  expectedComponent: string,
+): number {
   const normalizedPath = filePath.toLowerCase();
   let score = 0;
 
@@ -111,7 +120,10 @@ function filePriorityScore(filePath: string, expectedComponent: string): number 
     score += 10;
   }
 
-  if (normalizedPath.includes("/common/") || normalizedPath.includes("/browser/")) {
+  if (
+    normalizedPath.includes("/common/") ||
+    normalizedPath.includes("/browser/")
+  ) {
     score += 5;
   }
 
@@ -119,11 +131,18 @@ function filePriorityScore(filePath: string, expectedComponent: string): number 
     score -= 10;
   }
 
-  if (normalizedPath.endsWith(".css") || normalizedPath.endsWith(".md") || normalizedPath.endsWith(".yml")) {
+  if (
+    normalizedPath.endsWith(".css") ||
+    normalizedPath.endsWith(".md") ||
+    normalizedPath.endsWith(".yml")
+  ) {
     score -= 8;
   }
 
-  if (normalizedPath.startsWith(".vscode/") || normalizedPath.startsWith("build/")) {
+  if (
+    normalizedPath.startsWith(".vscode/") ||
+    normalizedPath.startsWith("build/")
+  ) {
     score -= 12;
   }
 
@@ -132,9 +151,11 @@ function filePriorityScore(filePath: string, expectedComponent: string): number 
 
 function deriveFocusedExpectedFiles(benchmarkCase: BenchmarkCase): string[] {
   const componentFiles = benchmarkCase.expected.files.filter(
-    (filePath) => mapFilePathToComponent(filePath) === benchmarkCase.expected.component
+    (filePath) =>
+      mapFilePathToComponent(filePath) === benchmarkCase.expected.component,
   );
-  const candidateFiles = componentFiles.length > 0 ? componentFiles : benchmarkCase.expected.files;
+  const candidateFiles =
+    componentFiles.length > 0 ? componentFiles : benchmarkCase.expected.files;
 
   return [...candidateFiles]
     .sort((left, right) => {
@@ -156,14 +177,18 @@ function recall(expectedFiles: string[], predictedFiles: string[]): number {
     return 0;
   }
 
-  const hits = expectedFiles.filter((file) => predictedFiles.includes(file)).length;
+  const hits = expectedFiles.filter((file) =>
+    predictedFiles.includes(file),
+  ).length;
   return hits / expectedFiles.length;
 }
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const holdoutSplit = loadHoldoutSplit();
-  const cases = args.limit ? holdoutSplit.test_cases.slice(0, args.limit) : holdoutSplit.test_cases;
+  const cases = args.limit
+    ? holdoutSplit.test_cases.slice(0, args.limit)
+    : holdoutSplit.test_cases;
 
   let componentCorrect = 0;
   let top1SupportExists = 0;
@@ -184,9 +209,22 @@ async function main() {
   let componentAlignedFileHitCount = 0;
   const perComponentStats = new Map<
     string,
-    { caseCount: number; top1Correct: number; top3Correct: number; componentAlignedHitCount: number }
+    {
+      caseCount: number;
+      top1Correct: number;
+      top3Correct: number;
+      componentAlignedHitCount: number;
+    }
   >();
-  const confusionStats = new Map<string, { expectedComponent: string; predictedComponent: string; count: number; sampleIssueNumbers: number[] }>();
+  const confusionStats = new Map<
+    string,
+    {
+      expectedComponent: string;
+      predictedComponent: string;
+      count: number;
+      sampleIssueNumbers: number[];
+    }
+  >();
   const failures: Array<{
     issue_number: number;
     expected_component: string;
@@ -201,34 +239,52 @@ async function main() {
     const recommendation = await generateRecommendation({
       title: benchmarkCase.title,
       description: benchmarkCase.body,
-      topK: 5
+      topK: 5,
     });
 
     const predictedComponent = recommendation.suggested_component;
-    const predictedFilesAt5 = recommendation.likely_impacted_files.slice(0, 5).map((file) => file.file_path);
-    const predictedFilesAt10 = recommendation.likely_impacted_files.slice(0, 10).map((file) => file.file_path);
+    const predictedFilesAt5 = recommendation.likely_impacted_files
+      .slice(0, 5)
+      .map((file) => file.file_path);
+    const predictedFilesAt10 = recommendation.likely_impacted_files
+      .slice(0, 10)
+      .map((file) => file.file_path);
     const expectedFiles = benchmarkCase.expected.files;
     const focusedExpectedFiles = deriveFocusedExpectedFiles(benchmarkCase);
-    const fileHitsAt5 = expectedFiles.filter((file) => predictedFilesAt5.includes(file)).length;
+    const fileHitsAt5 = expectedFiles.filter((file) =>
+      predictedFilesAt5.includes(file),
+    ).length;
     const fileRecallAt5 = recall(expectedFiles, predictedFilesAt5);
     const fileRecallAt10 = recall(expectedFiles, predictedFilesAt10);
-    const focusedFileRecallAt5 = recall(focusedExpectedFiles, predictedFilesAt5);
-    const focusedFileRecallAt10 = recall(focusedExpectedFiles, predictedFilesAt10);
-    const filePrecisionAt5 = predictedFilesAt5.length > 0 ? fileHitsAt5 / predictedFilesAt5.length : 0;
+    const focusedFileRecallAt5 = recall(
+      focusedExpectedFiles,
+      predictedFilesAt5,
+    );
+    const focusedFileRecallAt10 = recall(
+      focusedExpectedFiles,
+      predictedFilesAt10,
+    );
+    const filePrecisionAt5 =
+      predictedFilesAt5.length > 0 ? fileHitsAt5 / predictedFilesAt5.length : 0;
     const top3Components = unique(
-      recommendation.likely_impacted_files.map((file) => file.component).filter((component) => component !== "Unknown")
+      recommendation.likely_impacted_files
+        .map((file) => file.component)
+        .filter((component) => component !== "Unknown"),
     ).slice(0, 3);
     const componentAlignedHit = recommendation.likely_impacted_files.some(
-      (file) => file.component === benchmarkCase.expected.component
+      (file) => file.component === benchmarkCase.expected.component,
     );
     const isTop3Correct =
-      top3Components.includes(benchmarkCase.expected.component) || predictedComponent === benchmarkCase.expected.component;
+      top3Components.includes(benchmarkCase.expected.component) ||
+      predictedComponent === benchmarkCase.expected.component;
     const isBroadPrCase = expectedFiles.length > 10;
-    const componentStats = perComponentStats.get(benchmarkCase.expected.component) || {
+    const componentStats = perComponentStats.get(
+      benchmarkCase.expected.component,
+    ) || {
       caseCount: 0,
       top1Correct: 0,
       top3Correct: 0,
-      componentAlignedHitCount: 0
+      componentAlignedHitCount: 0,
     };
 
     componentStats.caseCount += 1;
@@ -271,7 +327,7 @@ async function main() {
       expectedComponent: benchmarkCase.expected.component,
       predictedComponent,
       count: 0,
-      sampleIssueNumbers: []
+      sampleIssueNumbers: [],
     };
 
     confusionRow.count += 1;
@@ -308,7 +364,7 @@ async function main() {
         expected_files: benchmarkCase.expected.files,
         focused_expected_files: focusedExpectedFiles,
         predicted_files: predictedFilesAt5,
-        predicted_duplicate: recommendation.possible_duplicate.issue_number
+        predicted_duplicate: recommendation.possible_duplicate.issue_number,
       });
     }
   }
@@ -320,24 +376,32 @@ async function main() {
         component,
         {
           case_count: stats.caseCount,
-          top1_accuracy: Number((stats.top1Correct / stats.caseCount).toFixed(3)),
-          top3_accuracy: Number((stats.top3Correct / stats.caseCount).toFixed(3)),
-          component_aligned_file_hit_rate: Number((stats.componentAlignedHitCount / stats.caseCount).toFixed(3))
-        }
-      ])
+          top1_accuracy: Number(
+            (stats.top1Correct / stats.caseCount).toFixed(3),
+          ),
+          top3_accuracy: Number(
+            (stats.top3Correct / stats.caseCount).toFixed(3),
+          ),
+          component_aligned_file_hit_rate: Number(
+            (stats.componentAlignedHitCount / stats.caseCount).toFixed(3),
+          ),
+        },
+      ]),
   );
 
-  const confusionMatrix = Array.from(confusionStats.values()).sort(
-    (left, right) =>
-      right.count - left.count ||
-      left.expectedComponent.localeCompare(right.expectedComponent) ||
-      left.predictedComponent.localeCompare(right.predictedComponent)
-  ).map((row) => ({
-    expected_component: row.expectedComponent,
-    predicted_component: row.predictedComponent,
-    count: row.count,
-    sample_issue_numbers: row.sampleIssueNumbers
-  }));
+  const confusionMatrix = Array.from(confusionStats.values())
+    .sort(
+      (left, right) =>
+        right.count - left.count ||
+        left.expectedComponent.localeCompare(right.expectedComponent) ||
+        left.predictedComponent.localeCompare(right.predictedComponent),
+    )
+    .map((row) => ({
+      expected_component: row.expectedComponent,
+      predicted_component: row.predictedComponent,
+      count: row.count,
+      sample_issue_numbers: row.sampleIssueNumbers,
+    }));
 
   const dominantMisroutes = confusionMatrix
     .filter((row) => row.expected_component !== row.predicted_component)
@@ -346,25 +410,51 @@ async function main() {
   const report: HoldoutEvaluationReport = {
     evaluated_cases: cases.length,
     component_accuracy: Number((componentCorrect / cases.length).toFixed(3)),
-    top1_support_coverage: Number((top1SupportExists / cases.length).toFixed(3)),
+    top1_support_coverage: Number(
+      (top1SupportExists / cases.length).toFixed(3),
+    ),
     file_recall_at_5: Number((fileRecallAt5Total / cases.length).toFixed(3)),
     file_recall_at_10: Number((fileRecallAt10Total / cases.length).toFixed(3)),
-    file_precision_at_5: Number((filePrecisionAt5Total / cases.length).toFixed(3)),
-    focused_file_recall_at_5: Number((focusedFileRecallAt5Total / cases.length).toFixed(3)),
-    focused_file_recall_at_10: Number((focusedFileRecallAt10Total / cases.length).toFixed(3)),
-    component_top3_accuracy: Number((componentTop3Correct / cases.length).toFixed(3)),
-    unknown_component_rate: Number((unknownPredictions / cases.length).toFixed(3)),
+    file_precision_at_5: Number(
+      (filePrecisionAt5Total / cases.length).toFixed(3),
+    ),
+    focused_file_recall_at_5: Number(
+      (focusedFileRecallAt5Total / cases.length).toFixed(3),
+    ),
+    focused_file_recall_at_10: Number(
+      (focusedFileRecallAt10Total / cases.length).toFixed(3),
+    ),
+    component_top3_accuracy: Number(
+      (componentTop3Correct / cases.length).toFixed(3),
+    ),
+    unknown_component_rate: Number(
+      (unknownPredictions / cases.length).toFixed(3),
+    ),
     narrow_case_count: narrowCaseCount,
-    narrow_file_recall_at_5: narrowCaseCount > 0 ? Number((narrowFileRecallAt5Total / narrowCaseCount).toFixed(3)) : 0,
+    narrow_file_recall_at_5:
+      narrowCaseCount > 0
+        ? Number((narrowFileRecallAt5Total / narrowCaseCount).toFixed(3))
+        : 0,
     narrow_focused_file_recall_at_5:
-      narrowCaseCount > 0 ? Number((narrowFocusedFileRecallAt5Total / narrowCaseCount).toFixed(3)) : 0,
+      narrowCaseCount > 0
+        ? Number((narrowFocusedFileRecallAt5Total / narrowCaseCount).toFixed(3))
+        : 0,
     broad_pr_case_count: broadPrCaseCount,
-    broad_file_recall_at_5: broadPrCaseCount > 0 ? Number((broadFileRecallAt5Total / broadPrCaseCount).toFixed(3)) : 0,
+    broad_file_recall_at_5:
+      broadPrCaseCount > 0
+        ? Number((broadFileRecallAt5Total / broadPrCaseCount).toFixed(3))
+        : 0,
     broad_focused_file_recall_at_5:
-      broadPrCaseCount > 0 ? Number((broadFocusedFileRecallAt5Total / broadPrCaseCount).toFixed(3)) : 0,
+      broadPrCaseCount > 0
+        ? Number((broadFocusedFileRecallAt5Total / broadPrCaseCount).toFixed(3))
+        : 0,
     broad_pr_component_accuracy:
-      broadPrCaseCount > 0 ? Number((broadPrComponentCorrect / broadPrCaseCount).toFixed(3)) : 0,
-    component_aligned_file_hit_rate: Number((componentAlignedFileHitCount / cases.length).toFixed(3)),
+      broadPrCaseCount > 0
+        ? Number((broadPrComponentCorrect / broadPrCaseCount).toFixed(3))
+        : 0,
+    component_aligned_file_hit_rate: Number(
+      (componentAlignedFileHitCount / cases.length).toFixed(3),
+    ),
     per_component: perComponent,
     confusion_matrix: confusionMatrix,
     dominant_misroutes: dominantMisroutes,
@@ -372,7 +462,7 @@ async function main() {
     train_issue_count: holdoutSplit.metadata.train_case_count,
     test_issue_count: holdoutSplit.metadata.test_case_count,
     train_closed_at_range: holdoutSplit.metadata.train_closed_at_range,
-    test_closed_at_range: holdoutSplit.metadata.test_closed_at_range
+    test_closed_at_range: holdoutSplit.metadata.test_closed_at_range,
   };
 
   logInfo("Holdout evaluation complete", report);

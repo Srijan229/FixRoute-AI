@@ -10,7 +10,7 @@ import type {
   GitHubTimelineCrossReferenceEvent,
   LinkedPullRequestRecord,
   PullRequestCommit,
-  PullRequestFile
+  PullRequestFile,
 } from "../lib/types.js";
 
 type PullRequestCheckpoint = {
@@ -19,11 +19,24 @@ type PullRequestCheckpoint = {
   timelineIssueIndex?: number;
 };
 
-const ISSUES_PATH = path.resolve(process.cwd(), "data", "raw", "issues", "issues.json");
-const OUTPUT_PATH = path.resolve(process.cwd(), "data", "raw", "pullRequests", "linkedPullRequests.json");
+const ISSUES_PATH = path.resolve(
+  process.cwd(),
+  "data",
+  "raw",
+  "issues",
+  "issues.json",
+);
+const OUTPUT_PATH = path.resolve(
+  process.cwd(),
+  "data",
+  "raw",
+  "pullRequests",
+  "linkedPullRequests.json",
+);
 const CHECKPOINT_NAME = "fetchPullRequests";
-const PER_PAGE = 100;
-const MAX_PR_PAGES = 20;
+const PER_PAGE = Number(process.env.PULL_REQUESTS_PER_PAGE || 100);
+const MAX_PR_PAGES = Number(process.env.PULL_REQUEST_FETCH_PAGE_LIMIT || 20);
+const TIMELINE_ISSUE_LIMIT = Number(process.env.TIMELINE_ISSUE_LIMIT || 0);
 const TIMELINE_SAVE_INTERVAL = 25;
 const ISSUE_LINK_REGEX =
   /\b(?:fixes|fixed|fix|closes|closed|close|resolves|resolved|resolve)\s+(?:https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/issues\/|[\w.-]+\/[\w.-]+#|#)(\d+)\b/gi;
@@ -55,7 +68,10 @@ function saveLinkedPullRequests(records: LinkedPullRequestRecord[]): void {
   fs.writeFileSync(OUTPUT_PATH, JSON.stringify(records, null, 2), "utf8");
 }
 
-function extractLinkedIssueNumbers(text: string, issueNumbers: Set<number>): number[] {
+function extractLinkedIssueNumbers(
+  text: string,
+  issueNumbers: Set<number>,
+): number[] {
   const matches = new Set<number>();
 
   for (const match of text.matchAll(ISSUE_LINK_REGEX)) {
@@ -73,7 +89,7 @@ async function fetchPullRequestFiles(
   github: ReturnType<typeof createGitHubClient>,
   owner: string,
   repo: string,
-  pullRequestNumber: number
+  pullRequestNumber: number,
 ): Promise<PullRequestFile[]> {
   const files: PullRequestFile[] = [];
   let page = 1;
@@ -84,9 +100,9 @@ async function fetchPullRequestFiles(
       {
         query: {
           per_page: PER_PAGE,
-          page
-        }
-      }
+          page,
+        },
+      },
     );
 
     if (pageFiles.length === 0) {
@@ -109,16 +125,18 @@ async function fetchPullRequestByNumber(
   github: ReturnType<typeof createGitHubClient>,
   owner: string,
   repo: string,
-  pullRequestNumber: number
+  pullRequestNumber: number,
 ): Promise<GitHubPullRequest> {
-  return github.get<GitHubPullRequest>(`/repos/${owner}/${repo}/pulls/${pullRequestNumber}`);
+  return github.get<GitHubPullRequest>(
+    `/repos/${owner}/${repo}/pulls/${pullRequestNumber}`,
+  );
 }
 
 async function fetchPullRequestCommits(
   github: ReturnType<typeof createGitHubClient>,
   owner: string,
   repo: string,
-  pullRequestNumber: number
+  pullRequestNumber: number,
 ): Promise<PullRequestCommit[]> {
   const commits: PullRequestCommit[] = [];
   let page = 1;
@@ -129,9 +147,9 @@ async function fetchPullRequestCommits(
       {
         query: {
           per_page: PER_PAGE,
-          page
-        }
-      }
+          page,
+        },
+      },
     );
 
     if (pageCommits.length === 0) {
@@ -154,18 +172,18 @@ async function fetchIssueTimelinePullRequestNumbers(
   github: ReturnType<typeof createGitHubClient>,
   owner: string,
   repo: string,
-  issueNumber: number
+  issueNumber: number,
 ): Promise<number[]> {
   const events = await github.get<GitHubTimelineCrossReferenceEvent[]>(
     `/repos/${owner}/${repo}/issues/${issueNumber}/timeline`,
     {
       query: {
-        per_page: 100
+        per_page: 100,
       },
       headers: {
-        Accept: "application/vnd.github+json"
-      }
-    }
+        Accept: "application/vnd.github+json",
+      },
+    },
   );
   const pullRequestNumbers = new Set<number>();
 
@@ -176,11 +194,18 @@ async function fetchIssueTimelinePullRequestNumbers(
 
     const referencedIssue = event.source?.issue;
 
-    if (!referencedIssue?.pull_request?.url || typeof referencedIssue.number !== "number") {
+    if (
+      !referencedIssue?.pull_request?.url ||
+      typeof referencedIssue.number !== "number"
+    ) {
       continue;
     }
 
-    if (!referencedIssue.pull_request.url.includes(`/repos/${owner}/${repo}/pulls/`)) {
+    if (
+      !referencedIssue.pull_request.url.includes(
+        `/repos/${owner}/${repo}/pulls/`,
+      )
+    ) {
       continue;
     }
 
@@ -195,24 +220,44 @@ async function hydrateLinkedPullRequest(
   owner: string,
   repo: string,
   pullRequestNumber: number,
-  linkedIssueNumbers: number[]
+  linkedIssueNumbers: number[],
 ): Promise<LinkedPullRequestRecord> {
-  const pullRequest = await fetchPullRequestByNumber(github, owner, repo, pullRequestNumber);
-  const files = await fetchPullRequestFiles(github, owner, repo, pullRequestNumber);
-  const commits = await fetchPullRequestCommits(github, owner, repo, pullRequestNumber);
+  const pullRequest = await fetchPullRequestByNumber(
+    github,
+    owner,
+    repo,
+    pullRequestNumber,
+  );
+  const files = await fetchPullRequestFiles(
+    github,
+    owner,
+    repo,
+    pullRequestNumber,
+  );
+  const commits = await fetchPullRequestCommits(
+    github,
+    owner,
+    repo,
+    pullRequestNumber,
+  );
 
   return {
     pullRequest,
     linkedIssueNumbers,
     files,
-    commits
+    commits,
   };
 }
 
-function mergeLinkedIssueNumbers(record: LinkedPullRequestRecord, linkedIssueNumbers: number[]): LinkedPullRequestRecord {
+function mergeLinkedIssueNumbers(
+  record: LinkedPullRequestRecord,
+  linkedIssueNumbers: number[],
+): LinkedPullRequestRecord {
   return {
     ...record,
-    linkedIssueNumbers: Array.from(new Set([...record.linkedIssueNumbers, ...linkedIssueNumbers])).sort((a, b) => a - b)
+    linkedIssueNumbers: Array.from(
+      new Set([...record.linkedIssueNumbers, ...linkedIssueNumbers]),
+    ).sort((a, b) => a - b),
   };
 }
 
@@ -225,11 +270,11 @@ async function main() {
   const checkpoint = loadCheckpoint<PullRequestCheckpoint>(CHECKPOINT_NAME) ?? {
     page: 1,
     linkedPullRequestCount: existingRecords.length,
-    timelineIssueIndex: 0
+    timelineIssueIndex: 0,
   };
 
   const linkedPullRequestMap = new Map<number, LinkedPullRequestRecord>(
-    existingRecords.map((record) => [record.pullRequest.number, record])
+    existingRecords.map((record) => [record.pullRequest.number, record]),
   );
 
   let currentPage = checkpoint.page;
@@ -239,7 +284,7 @@ async function main() {
     repo: env.GITHUB_REPO,
     issueCount: issueNumbers.size,
     startingPage: currentPage,
-    existingLinkedPullRequests: linkedPullRequestMap.size
+    existingLinkedPullRequests: linkedPullRequestMap.size,
   });
 
   while (currentPage < checkpoint.page + MAX_PR_PAGES) {
@@ -251,9 +296,9 @@ async function main() {
           sort: "updated",
           direction: "desc",
           per_page: PER_PAGE,
-          page: currentPage
-        }
-      }
+          page: currentPage,
+        },
+      },
     );
 
     if (pullRequests.length === 0) {
@@ -277,12 +322,12 @@ async function main() {
           github,
           env.GITHUB_OWNER,
           env.GITHUB_REPO,
-          pullRequest.number
+          pullRequest.number,
         );
 
         linkedIssueNumbers = extractLinkedIssueNumbers(
           commits.map((commit) => commit.commit.message).join("\n\n"),
-          issueNumbers
+          issueNumbers,
         );
       }
 
@@ -294,14 +339,14 @@ async function main() {
         github,
         env.GITHUB_OWNER,
         env.GITHUB_REPO,
-        pullRequest.number
+        pullRequest.number,
       );
 
       linkedPullRequestMap.set(pullRequest.number, {
         pullRequest,
         linkedIssueNumbers,
         files,
-        commits
+        commits,
       });
 
       linkedThisPage += 1;
@@ -312,23 +357,30 @@ async function main() {
     saveCheckpoint(CHECKPOINT_NAME, {
       page: currentPage,
       linkedPullRequestCount: linkedPullRequestMap.size,
-      timelineIssueIndex: checkpoint.timelineIssueIndex ?? 0
+      timelineIssueIndex: checkpoint.timelineIssueIndex ?? 0,
     });
 
     logInfo("Processed pull request page", {
       currentPage: currentPage - 1,
       linkedPullRequestsStored: linkedPullRequestMap.size,
-      linkedThisPage
+      linkedThisPage,
     });
   }
 
   const linkedIssueNumbers = new Set<number>(
-    Array.from(linkedPullRequestMap.values()).flatMap((record) => record.linkedIssueNumbers)
+    Array.from(linkedPullRequestMap.values()).flatMap(
+      (record) => record.linkedIssueNumbers,
+    ),
   );
   let timelineIssueIndex = checkpoint.timelineIssueIndex ?? 0;
   let timelineLinkedCount = 0;
 
-  while (timelineIssueIndex < issues.length) {
+  const timelineIssueStopIndex =
+    TIMELINE_ISSUE_LIMIT > 0
+      ? Math.min(issues.length, timelineIssueIndex + TIMELINE_ISSUE_LIMIT)
+      : issues.length;
+
+  while (timelineIssueIndex < timelineIssueStopIndex) {
     const issue = issues[timelineIssueIndex];
     timelineIssueIndex += 1;
 
@@ -337,7 +389,7 @@ async function main() {
         saveCheckpoint(CHECKPOINT_NAME, {
           page: currentPage,
           linkedPullRequestCount: linkedPullRequestMap.size,
-          timelineIssueIndex
+          timelineIssueIndex,
         });
       }
       continue;
@@ -347,7 +399,7 @@ async function main() {
       github,
       env.GITHUB_OWNER,
       env.GITHUB_REPO,
-      issue.number
+      issue.number,
     );
 
     if (timelinePrNumbers.length > 0) {
@@ -357,7 +409,7 @@ async function main() {
         if (existingRecord) {
           linkedPullRequestMap.set(
             pullRequestNumber,
-            mergeLinkedIssueNumbers(existingRecord, [issue.number])
+            mergeLinkedIssueNumbers(existingRecord, [issue.number]),
           );
         } else {
           try {
@@ -366,14 +418,14 @@ async function main() {
               env.GITHUB_OWNER,
               env.GITHUB_REPO,
               pullRequestNumber,
-              [issue.number]
+              [issue.number],
             );
             linkedPullRequestMap.set(pullRequestNumber, hydratedRecord);
           } catch (error) {
             logInfo("Skipping invalid timeline-linked pull request", {
               issueNumber: issue.number,
               pullRequestNumber,
-              message: error instanceof Error ? error.message : "Unknown error"
+              message: error instanceof Error ? error.message : "Unknown error",
             });
             continue;
           }
@@ -389,13 +441,13 @@ async function main() {
       saveCheckpoint(CHECKPOINT_NAME, {
         page: currentPage,
         linkedPullRequestCount: linkedPullRequestMap.size,
-        timelineIssueIndex
+        timelineIssueIndex,
       });
 
       logInfo("Processed issue timeline batch", {
         scannedIssueCount: timelineIssueIndex,
         linkedPullRequestsStored: linkedPullRequestMap.size,
-        timelineLinkedCount
+        timelineLinkedCount,
       });
     }
   }
@@ -404,14 +456,14 @@ async function main() {
   saveCheckpoint(CHECKPOINT_NAME, {
     page: currentPage,
     linkedPullRequestCount: linkedPullRequestMap.size,
-    timelineIssueIndex
+    timelineIssueIndex,
   });
 
   logInfo("Pull request fetch complete", {
     totalLinkedPullRequestsStored: linkedPullRequestMap.size,
     timelineIssueIndex,
     timelineLinkedCount,
-    outputPath: OUTPUT_PATH
+    outputPath: OUTPUT_PATH,
   });
 }
 

@@ -1,6 +1,17 @@
 export function mapFilePathToComponent(filePath: string): string {
   const normalized = filePath.toLowerCase();
 
+  if (
+    normalized.includes("/parts/titlebar/") ||
+    normalized.includes("titlebarpart") ||
+    normalized.includes("/actions/layoutactions") ||
+    normalized.includes("/parts/panel/panelactions") ||
+    normalized.includes("/parts/auxiliarybar/auxiliarybaractions") ||
+    normalized.includes("/actions/windowactions")
+  ) {
+    return "WorkbenchLayout";
+  }
+
   if (normalized.includes("src/vs/sessions/")) {
     return "Sessions";
   }
@@ -22,7 +33,6 @@ export function mapFilePathToComponent(filePath: string): string {
     normalized.includes("/sessions/") ||
     normalized.includes("sessionslistmodelservice") ||
     normalized.includes("sessiontypepicker") ||
-    normalized.includes("titlebarpart") ||
     normalized.includes("sessionstitlebarwidget")
   ) {
     return "Sessions";
@@ -106,17 +116,11 @@ export function mapFilePathToComponent(filePath: string): string {
     return "Update";
   }
 
-  if (
-    normalized.includes("/issue/") ||
-    normalized.includes("issuereporter")
-  ) {
+  if (normalized.includes("/issue/") || normalized.includes("issuereporter")) {
     return "IssueReporter";
   }
 
-  if (
-    normalized.includes("/tasks/") ||
-    normalized.includes("taskservice")
-  ) {
+  if (normalized.includes("/tasks/") || normalized.includes("taskservice")) {
     return "Tasks";
   }
 

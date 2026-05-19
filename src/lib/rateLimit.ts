@@ -6,7 +6,9 @@ type RetryableRateLimitError = Error & {
   retryAfterMs?: number;
 };
 
-export async function withRateLimitRetry<T>(operation: () => Promise<T>): Promise<T> {
+export async function withRateLimitRetry<T>(
+  operation: () => Promise<T>,
+): Promise<T> {
   let attempt = 0;
 
   while (attempt < 5) {
@@ -23,9 +25,10 @@ export async function withRateLimitRetry<T>(operation: () => Promise<T>): Promis
         typeof error === "object" && error !== null && "retryAfterMs" in error
           ? (error as RetryableRateLimitError).retryAfterMs
           : undefined;
-      const backoffMs = retryAfterMs && retryAfterMs > 0
-        ? retryAfterMs
-        : Math.min(1000 * 2 ** (attempt - 1), 10000);
+      const backoffMs =
+        retryAfterMs && retryAfterMs > 0
+          ? retryAfterMs
+          : Math.min(1000 * 2 ** (attempt - 1), 10000);
       await sleep(backoffMs);
     }
   }

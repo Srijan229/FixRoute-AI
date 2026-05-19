@@ -33,7 +33,11 @@ function isRoutingDiscoveryError(error: unknown): boolean {
 
 export function createNeo4jClient(): Neo4jClient {
   const env = loadNeo4jEnv();
-  let activeDriver: Driver = createDriver(env.NEO4J_URI, env.NEO4J_USERNAME, env.NEO4J_PASSWORD);
+  let activeDriver: Driver = createDriver(
+    env.NEO4J_URI,
+    env.NEO4J_USERNAME,
+    env.NEO4J_PASSWORD,
+  );
   let activeUri = env.NEO4J_URI;
 
   async function ensureConnectivity(): Promise<void> {
@@ -47,7 +51,11 @@ export function createNeo4jClient(): Neo4jClient {
       }
 
       await activeDriver.close();
-      activeDriver = createDriver(fallbackUri, env.NEO4J_USERNAME, env.NEO4J_PASSWORD);
+      activeDriver = createDriver(
+        fallbackUri,
+        env.NEO4J_USERNAME,
+        env.NEO4J_PASSWORD,
+      );
       activeUri = fallbackUri;
       await activeDriver.verifyConnectivity();
     }
@@ -58,6 +66,6 @@ export function createNeo4jClient(): Neo4jClient {
     getSession: () => activeDriver.session(),
     verifyConnection: async () => {
       await ensureConnectivity();
-    }
+    },
   };
 }

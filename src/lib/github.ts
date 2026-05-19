@@ -6,7 +6,11 @@ type RequestOptions = {
   headers?: Record<string, string>;
 };
 
-function buildUrl(baseUrl: string, requestPath: string, query?: Record<string, string | number>): string {
+function buildUrl(
+  baseUrl: string,
+  requestPath: string,
+  query?: Record<string, string | number>,
+): string {
   const url = new URL(requestPath, baseUrl);
 
   if (query) {
@@ -24,28 +28,43 @@ class GitHubRateLimitError extends Error {
 
 export function createGitHubClient() {
   const env = loadGitHubEnv();
+  const requestTimeoutMs = Number(
+    process.env.GITHUB_REQUEST_TIMEOUT_MS || 30000,
+  );
 
-  async function get<T>(requestPath: string, options?: RequestOptions): Promise<T> {
+  async function get<T>(
+    requestPath: string,
+    options?: RequestOptions,
+  ): Promise<T> {
     const url = buildUrl(env.GITHUB_API_BASE_URL, requestPath, options?.query);
 
     return withRateLimitRetry(async () => {
+      const headers: Record<string, string> = {
+        Accept: "application/vnd.github+json",
+        "User-Agent": "FixRoute-AI",
+        ...options?.headers,
+      };
+
+      if (env.GITHUB_TOKEN) {
+        headers.Authorization = `Bearer ${env.GITHUB_TOKEN}`;
+      }
+
       const response = await fetch(url, {
-        headers: {
-          Accept: "application/vnd.github+json",
-          Authorization: `Bearer ${env.GITHUB_TOKEN}`,
-          "User-Agent": "FixRoute-AI",
-          ...options?.headers
-        }
+        signal: AbortSignal.timeout(requestTimeoutMs),
+        headers,
       });
 
       if (!response.ok) {
         const body = await response.text();
 
-        if (response.status === 403 && body.toLowerCase().includes("rate limit exceeded")) {
+        if (
+          response.status === 403 &&
+          body.toLowerCase().includes("rate limit exceeded")
+        ) {
           const resetHeader = response.headers.get("x-ratelimit-reset");
           const retryAfterHeader = response.headers.get("retry-after");
           const error = new GitHubRateLimitError(
-            `GitHub rate limit exceeded: ${response.status} ${response.statusText} ${body}`
+            `GitHub rate limit exceeded: ${response.status} ${response.statusText} ${body}`,
           );
 
           if (retryAfterHeader) {
@@ -66,7 +85,9 @@ export function createGitHubClient() {
           throw error;
         }
 
-        throw new Error(`GitHub request failed: ${response.status} ${response.statusText} ${body}`);
+        throw new Error(
+          `GitHub request failed: ${response.status} ${response.statusText} ${body}`,
+        );
       }
 
       return (await response.json()) as T;
@@ -74,6 +95,6 @@ export function createGitHubClient() {
   }
 
   return {
-    get
+    get,
   };
 }

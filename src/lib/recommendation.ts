@@ -1,6 +1,17 @@
-import { createEmbeddingProvider, cosineSimilarity, loadEmbeddingIndex } from "./embeddings.js";
+import {
+  createEmbeddingProvider,
+  cosineSimilarity,
+  loadEmbeddingIndex,
+  loadRichSemanticIndex,
+} from "./embeddings.js";
 import { fetchIssueEvidence } from "./graphQueries.js";
-import type { QueryIssueResult, RecommendationResult } from "./types.js";
+import { mapFilePathToComponent } from "./componentMapper.js";
+import { getPathQuality } from "./pathQuality.js";
+import type {
+  QueryIssueResult,
+  RecommendationResult,
+  RichSemanticRecord,
+} from "./types.js";
 
 type RankedCandidate = {
   issueNumber: number;
@@ -15,6 +26,11 @@ type RankedCandidate = {
 type SimilarTicketCandidate = {
   candidate: RankedCandidate;
   similarityScore: number;
+};
+
+type RichSemanticMatch = {
+  record: RichSemanticRecord;
+  score: number;
 };
 
 export type RecommendationInput = {
@@ -55,7 +71,9 @@ function inferTicketType(title: string, description: string): string {
 }
 
 function tokenize(text: string): string[] {
-  return (text.toLowerCase().match(/[a-z0-9_./-]+/g) || []).filter((token) => token.length >= 3);
+  return (text.toLowerCase().match(/[a-z0-9_./-]+/g) || []).filter(
+    (token) => token.length >= 3,
+  );
 }
 
 function keywordScore(queryText: string, candidateText: string): number {
@@ -66,7 +84,9 @@ function keywordScore(queryText: string, candidateText: string): number {
     return 0;
   }
 
-  const matches = queryTokens.filter((token) => candidateTokens.has(token)).length;
+  const matches = queryTokens.filter((token) =>
+    candidateTokens.has(token),
+  ).length;
   return matches / queryTokens.length;
 }
 
@@ -90,7 +110,11 @@ function jaccardScore(left: string[], right: string[]): number {
   return union === 0 ? 0 : intersection / union;
 }
 
-function filePathRelevanceScore(queryText: string, filePath: string, component: string): number {
+function filePathRelevanceScore(
+  queryText: string,
+  filePath: string,
+  component: string,
+): number {
   const queryTokens = Array.from(new Set(tokenize(queryText)));
   const pathTokens = new Set(tokenize(filePath));
   const componentTokens = new Set(tokenize(component));
@@ -104,7 +128,11 @@ function filePathRelevanceScore(queryText: string, filePath: string, component: 
   for (const token of queryTokens) {
     if (pathTokens.has(token)) {
       score += 1.2;
-    } else if (Array.from(pathTokens).some((pathToken) => pathToken.includes(token) || token.includes(pathToken))) {
+    } else if (
+      Array.from(pathTokens).some(
+        (pathToken) => pathToken.includes(token) || token.includes(pathToken),
+      )
+    ) {
       score += 0.5;
     }
 
@@ -116,10 +144,10 @@ function filePathRelevanceScore(queryText: string, filePath: string, component: 
   return score / queryTokens.length;
 }
 
-
 function genericFilePenalty(filePath: string): number {
+  const quality = getPathQuality(filePath);
   const normalizedPath = filePath.toLowerCase();
-  let penalty = 1;
+  let penalty = quality.score;
 
   if (normalizedPath.endsWith("/chat.contribution.ts")) {
     penalty *= 0.45;
@@ -148,15 +176,27 @@ function genericFilePenalty(filePath: string): number {
   return penalty;
 }
 
-function pathFamilyBoost(queryText: string, filePath: string, component: string): number {
+function pathFamilyBoost(
+  queryText: string,
+  filePath: string,
+  component: string,
+): number {
   const text = queryText.toLowerCase();
   const normalizedPath = filePath.toLowerCase();
   let boost = 1;
 
-  const hasAny = (tokens: string[]) => tokens.some((token) => text.includes(token));
+  const hasAny = (tokens: string[]) =>
+    tokens.some((token) => text.includes(token));
 
   if (
-    hasAny(["session", "account menu", "aquarium", "agent feedback", "copilot chat session", "title bar"]) &&
+    hasAny([
+      "session",
+      "account menu",
+      "aquarium",
+      "agent feedback",
+      "copilot chat session",
+      "title bar",
+    ]) &&
     (normalizedPath.includes("src/vs/sessions/") || component === "Sessions")
   ) {
     boost *= 1.9;
@@ -164,56 +204,87 @@ function pathFamilyBoost(queryText: string, filePath: string, component: string)
 
   if (
     hasAny(["authentication", "auth", "token", "sign in", "login", "access"]) &&
-    (normalizedPath.includes("/authentication/") || normalizedPath.includes("copilottoken") || component === "Authentication")
+    (normalizedPath.includes("/authentication/") ||
+      normalizedPath.includes("copilottoken") ||
+      component === "Authentication")
   ) {
     boost *= 1.9;
   }
 
   if (
-    hasAny(["setting", "settings", "configuration", "provider", "endpoint", "byok", "model"]) &&
-    (normalizedPath.includes("configuration") || normalizedPath.includes("settings") || component === "Settings")
+    hasAny([
+      "setting",
+      "settings",
+      "configuration",
+      "provider",
+      "endpoint",
+      "byok",
+      "model",
+    ]) &&
+    (normalizedPath.includes("configuration") ||
+      normalizedPath.includes("settings") ||
+      component === "Settings")
   ) {
     boost *= 1.75;
   }
 
   if (
     hasAny(["issue reporter", "report issue", "issue report"]) &&
-    (normalizedPath.includes("/contrib/issue/") || normalizedPath.includes("issuereporter") || component === "IssueReporter")
+    (normalizedPath.includes("/contrib/issue/") ||
+      normalizedPath.includes("issuereporter") ||
+      component === "IssueReporter")
   ) {
     boost *= 2;
   }
 
   if (
     hasAny(["welcome", "getting started", "onboarding"]) &&
-    (normalizedPath.includes("welcomegettingstarted") || normalizedPath.includes("gettingstarted") || component === "GettingStarted")
+    (normalizedPath.includes("welcomegettingstarted") ||
+      normalizedPath.includes("gettingstarted") ||
+      component === "GettingStarted")
   ) {
     boost *= 2;
   }
 
   if (
     hasAny(["task", "tasks", "task output"]) &&
-    (normalizedPath.includes("/tasks/") || normalizedPath.includes("taskservice") || component === "Tasks")
+    (normalizedPath.includes("/tasks/") ||
+      normalizedPath.includes("taskservice") ||
+      component === "Tasks")
   ) {
     boost *= 1.7;
   }
 
   if (
     hasAny(["search", "ignore file", "ripgrep"]) &&
-    (normalizedPath.includes("/search/") || normalizedPath.includes("ignorefile") || component === "Search")
+    (normalizedPath.includes("/search/") ||
+      normalizedPath.includes("ignorefile") ||
+      component === "Search")
   ) {
     boost *= 1.7;
   }
 
   if (
-    hasAny(["terminal", "shell", "pty", "osc 8", "output monitor", "run in terminal"]) &&
-    (normalizedPath.includes("/terminal/") || normalizedPath.includes("terminalcontrib") || component === "Terminal")
+    hasAny([
+      "terminal",
+      "shell",
+      "pty",
+      "osc 8",
+      "output monitor",
+      "run in terminal",
+    ]) &&
+    (normalizedPath.includes("/terminal/") ||
+      normalizedPath.includes("terminalcontrib") ||
+      component === "Terminal")
   ) {
     boost *= 1.5;
   }
 
   if (
     hasAny(["extension", "enablement", "marketplace", "profile"]) &&
-    (normalizedPath.includes("/extension") || normalizedPath.includes("extensionmanagement") || component === "Extensions")
+    (normalizedPath.includes("/extension") ||
+      normalizedPath.includes("extensionmanagement") ||
+      component === "Extensions")
   ) {
     boost *= 1.6;
   }
@@ -221,7 +292,10 @@ function pathFamilyBoost(queryText: string, filePath: string, component: string)
   return boost;
 }
 
-function componentPathAffinityScore(component: string, filePath: string): number {
+function componentPathAffinityScore(
+  component: string,
+  filePath: string,
+): number {
   const normalizedPath = filePath.toLowerCase();
 
   if (component === "Chat") {
@@ -231,15 +305,25 @@ function componentPathAffinityScore(component: string, filePath: string): number
       score += 1.8;
     }
 
-    if (normalizedPath.includes("/common/chats") || normalizedPath.includes("/common/chat")) {
+    if (
+      normalizedPath.includes("/common/chats") ||
+      normalizedPath.includes("/common/chat")
+    ) {
       score += 1.5;
     }
 
-    if (normalizedPath.includes("/browser/widget/") || normalizedPath.includes("/browser/agentsessions/")) {
+    if (
+      normalizedPath.includes("/browser/widget/") ||
+      normalizedPath.includes("/browser/agentsessions/")
+    ) {
       score += 1.25;
     }
 
-    if (normalizedPath.includes("chatservice") || normalizedPath.includes("chatmodel") || normalizedPath.includes("chatagents")) {
+    if (
+      normalizedPath.includes("chatservice") ||
+      normalizedPath.includes("chatmodel") ||
+      normalizedPath.includes("chatagents")
+    ) {
       score += 1.25;
     }
 
@@ -287,11 +371,18 @@ function componentPathAffinityScore(component: string, filePath: string): number
       score += 1.8;
     }
 
-    if (normalizedPath.includes("/contrib/sessions/") || normalizedPath.includes("/contrib/accountmenu/")) {
+    if (
+      normalizedPath.includes("/contrib/sessions/") ||
+      normalizedPath.includes("/contrib/accountmenu/")
+    ) {
       score += 1.1;
     }
 
-    if (normalizedPath.includes("session") || normalizedPath.includes("accountmenu") || normalizedPath.includes("aquarium")) {
+    if (
+      normalizedPath.includes("session") ||
+      normalizedPath.includes("accountmenu") ||
+      normalizedPath.includes("aquarium")
+    ) {
       score += 0.75;
     }
 
@@ -309,7 +400,10 @@ function componentPathAffinityScore(component: string, filePath: string): number
       score += 1.6;
     }
 
-    if (normalizedPath.includes("/snippet/") || normalizedPath.includes("snippetsession")) {
+    if (
+      normalizedPath.includes("/snippet/") ||
+      normalizedPath.includes("snippetsession")
+    ) {
       score += 1.2;
     }
 
@@ -327,7 +421,10 @@ function componentPathAffinityScore(component: string, filePath: string): number
       score += 1.8;
     }
 
-    if (normalizedPath.includes("ignorefile") || normalizedPath.includes("ripgrep")) {
+    if (
+      normalizedPath.includes("ignorefile") ||
+      normalizedPath.includes("ripgrep")
+    ) {
       score += 1.2;
     }
 
@@ -337,7 +434,10 @@ function componentPathAffinityScore(component: string, filePath: string): number
   if (component === "Settings") {
     let score = 1;
 
-    if (normalizedPath.includes("configuration") || normalizedPath.includes("settings")) {
+    if (
+      normalizedPath.includes("configuration") ||
+      normalizedPath.includes("settings")
+    ) {
       score += 1.5;
     }
 
@@ -355,7 +455,10 @@ function componentPathAffinityScore(component: string, filePath: string): number
       score += 1.4;
     }
 
-    if (normalizedPath.includes("extensionenablement") || normalizedPath.includes("extensionmanagement")) {
+    if (
+      normalizedPath.includes("extensionenablement") ||
+      normalizedPath.includes("extensionmanagement")
+    ) {
       score += 1.1;
     }
 
@@ -365,7 +468,10 @@ function componentPathAffinityScore(component: string, filePath: string): number
   if (component === "Authentication") {
     let score = 1;
 
-    if (normalizedPath.includes("authentication") || normalizedPath.includes("copilottoken")) {
+    if (
+      normalizedPath.includes("authentication") ||
+      normalizedPath.includes("copilottoken")
+    ) {
       score += 1.7;
     }
 
@@ -375,7 +481,10 @@ function componentPathAffinityScore(component: string, filePath: string): number
   if (component === "Update") {
     let score = 1;
 
-    if (normalizedPath.includes("/update/") || normalizedPath.includes("updateservice")) {
+    if (
+      normalizedPath.includes("/update/") ||
+      normalizedPath.includes("updateservice")
+    ) {
       score += 1.6;
     }
 
@@ -385,7 +494,10 @@ function componentPathAffinityScore(component: string, filePath: string): number
   if (component === "Tasks") {
     let score = 1;
 
-    if (normalizedPath.includes("/tasks/") || normalizedPath.includes("taskservice")) {
+    if (
+      normalizedPath.includes("/tasks/") ||
+      normalizedPath.includes("taskservice")
+    ) {
       score += 1.6;
     }
 
@@ -395,7 +507,11 @@ function componentPathAffinityScore(component: string, filePath: string): number
   return 1;
 }
 
-function componentQueryAffinityScore(component: string, title: string, description: string): number {
+function componentQueryAffinityScore(
+  component: string,
+  title: string,
+  description: string,
+): number {
   const titleText = title.toLowerCase();
   const descriptionText = description.toLowerCase();
   const combinedText = `${titleText}\n${descriptionText}`;
@@ -485,15 +601,24 @@ function componentQueryAffinityScore(component: string, title: string, descripti
       score += 1.2;
     }
 
-    if (combinedText.includes("account menu") || combinedText.includes("aquarium")) {
+    if (
+      combinedText.includes("account menu") ||
+      combinedText.includes("aquarium")
+    ) {
       score += 1.1;
     }
 
-    if (combinedText.includes("agent feedback") || combinedText.includes("copilot chat session")) {
+    if (
+      combinedText.includes("agent feedback") ||
+      combinedText.includes("copilot chat session")
+    ) {
       score += 1.1;
     }
 
-    if (combinedText.includes("remote agent host") || combinedText.includes("title bar")) {
+    if (
+      combinedText.includes("remote agent host") ||
+      combinedText.includes("title bar")
+    ) {
       score += 0.9;
     }
 
@@ -505,7 +630,10 @@ function componentQueryAffinityScore(component: string, title: string, descripti
       score += 1.7;
     }
 
-    if (combinedText.includes("inline edit") || combinedText.includes("editor")) {
+    if (
+      combinedText.includes("inline edit") ||
+      combinedText.includes("editor")
+    ) {
       score += 0.8;
     }
 
@@ -517,7 +645,10 @@ function componentQueryAffinityScore(component: string, title: string, descripti
       score += 1.6;
     }
 
-    if (combinedText.includes("ignore file") || combinedText.includes("ripgrep")) {
+    if (
+      combinedText.includes("ignore file") ||
+      combinedText.includes("ripgrep")
+    ) {
       score += 1.3;
     }
 
@@ -525,11 +656,18 @@ function componentQueryAffinityScore(component: string, title: string, descripti
   }
 
   if (component === "Settings") {
-    if (combinedText.includes("setting") || combinedText.includes("configuration")) {
+    if (
+      combinedText.includes("setting") ||
+      combinedText.includes("configuration")
+    ) {
       score += 1.4;
     }
 
-    if (combinedText.includes("endpoint") || combinedText.includes("provider") || combinedText.includes("model")) {
+    if (
+      combinedText.includes("endpoint") ||
+      combinedText.includes("provider") ||
+      combinedText.includes("model")
+    ) {
       score += 1.1;
     }
 
@@ -541,7 +679,11 @@ function componentQueryAffinityScore(component: string, title: string, descripti
       score += 1.5;
     }
 
-    if (combinedText.includes("enablement") || combinedText.includes("marketplace") || combinedText.includes("profile")) {
+    if (
+      combinedText.includes("enablement") ||
+      combinedText.includes("marketplace") ||
+      combinedText.includes("profile")
+    ) {
       score += 1;
     }
 
@@ -567,7 +709,11 @@ function componentQueryAffinityScore(component: string, title: string, descripti
       score += 1.2;
     }
 
-    if (combinedText.includes("installer") || combinedText.includes("win32") || combinedText.includes("insider")) {
+    if (
+      combinedText.includes("installer") ||
+      combinedText.includes("win32") ||
+      combinedText.includes("insider")
+    ) {
       score += 1.2;
     }
 
@@ -587,7 +733,11 @@ function componentQueryAffinityScore(component: string, title: string, descripti
   }
 
   if (component === "GettingStarted") {
-    if (combinedText.includes("welcome") || combinedText.includes("getting started") || combinedText.includes("onboarding")) {
+    if (
+      combinedText.includes("welcome") ||
+      combinedText.includes("getting started") ||
+      combinedText.includes("onboarding")
+    ) {
       score += 1.6;
     }
 
@@ -648,25 +798,45 @@ function rerankEvidenceCandidate(
   queryText: string,
   queryTokens: string[],
   candidate: RankedCandidate,
-  evidence: QueryIssueResult
+  evidence: QueryIssueResult,
 ): number {
-  const candidateLabelTokens = evidence.issue.labels.flatMap((label) => tokenize(label));
+  const candidateLabelTokens = evidence.issue.labels.flatMap((label) =>
+    tokenize(label),
+  );
   const labelScore = jaccardScore(queryTokens, candidateLabelTokens);
-  const candidateTextScore = keywordScore(queryText, `${evidence.issue.title}\n${candidate.title}`);
-  const componentNames = Array.from(new Set(evidence.likelyFiles.map((file) => file.component).filter((component) => component !== "Unknown")));
+  const candidateTextScore = keywordScore(
+    queryText,
+    `${evidence.issue.title}\n${candidate.title}`,
+  );
+  const componentNames = Array.from(
+    new Set(
+      evidence.likelyFiles
+        .map((file) => file.component)
+        .filter((component) => component !== "Unknown"),
+    ),
+  );
   const bestComponentQueryFit =
     componentNames.length > 0
-      ? Math.max(...componentNames.map((component) => componentQueryAffinityScore(component, candidate.title, queryText)))
+      ? Math.max(
+          ...componentNames.map((component) =>
+            componentQueryAffinityScore(component, candidate.title, queryText),
+          ),
+        )
       : 1;
   const bestFileQueryFit =
     evidence.likelyFiles.length > 0
-      ? Math.max(...evidence.likelyFiles.map((file) => filePathRelevanceScore(queryText, file.path, file.component)))
+      ? Math.max(
+          ...evidence.likelyFiles.map((file) =>
+            filePathRelevanceScore(queryText, file.path, file.component),
+          ),
+        )
       : 0;
   const avgFileQueryFit =
     evidence.likelyFiles.length > 0
       ? evidence.likelyFiles.reduce(
-          (sum, file) => sum + filePathRelevanceScore(queryText, file.path, file.component),
-          0
+          (sum, file) =>
+            sum + filePathRelevanceScore(queryText, file.path, file.component),
+          0,
         ) / evidence.likelyFiles.length
       : 0;
   const hasEvidenceBonus = evidence.linkedPullRequests.length > 0 ? 0.05 : 0;
@@ -682,7 +852,62 @@ function rerankEvidenceCandidate(
   );
 }
 
-export async function generateRecommendation(input: RecommendationInput): Promise<RecommendationResult> {
+function loadOptionalRichSemanticMatches(
+  queryVector: number[],
+  limit: number,
+): RichSemanticMatch[] {
+  try {
+    const index = loadRichSemanticIndex();
+
+    if (
+      index.records.length === 0 ||
+      index.records[0].vector.length !== queryVector.length
+    ) {
+      return [];
+    }
+
+    return index.records
+      .filter(
+        (record) =>
+          record.type === "patch_hunk" || record.type === "review_comment",
+      )
+      .filter((record) => {
+        const qualityScore = record.metadata.pathQualityScore;
+        return typeof qualityScore !== "number" || qualityScore >= 0.25;
+      })
+      .map((record) => ({
+        record,
+        score: cosineSimilarity(queryVector, record.vector),
+      }))
+      .sort((left, right) => right.score - left.score)
+      .slice(0, limit);
+  } catch {
+    return [];
+  }
+}
+
+function formatLineRange(record: RichSemanticRecord): string {
+  const newStartLine = record.metadata.newStartLine;
+  const newLineCount = record.metadata.newLineCount;
+  const reviewLine = record.metadata.line;
+
+  if (typeof newStartLine === "number" && typeof newLineCount === "number") {
+    const endLine = newStartLine + Math.max(newLineCount - 1, 0);
+    return newStartLine === endLine
+      ? `line ${newStartLine}`
+      : `lines ${newStartLine}-${endLine}`;
+  }
+
+  if (typeof reviewLine === "number") {
+    return `line ${reviewLine}`;
+  }
+
+  return "line range unavailable";
+}
+
+export async function generateRecommendation(
+  input: RecommendationInput,
+): Promise<RecommendationResult> {
   const normalized = normalizeInput(input);
   const provider = createEmbeddingProvider();
   const embeddingIndex = loadEmbeddingIndex();
@@ -697,7 +922,7 @@ export async function generateRecommendation(input: RecommendationInput): Promis
 
   if (embeddingIndex[0].vector.length !== queryVector.length) {
     throw new Error(
-      `Embedding dimension mismatch. Rebuild the index with 'npm run create:embeddings -- --reset' for the current provider.`
+      `Embedding dimension mismatch. Rebuild the index with 'npm run create:embeddings -- --reset' for the current provider.`,
     );
   }
 
@@ -714,35 +939,49 @@ export async function generateRecommendation(input: RecommendationInput): Promis
         labels: record.labels,
         score: blendedScore,
         semanticScore,
-        lexicalScore
+        lexicalScore,
       };
     })
     .sort((left, right) => right.score - left.score);
 
   const queryTokens = Array.from(new Set(tokenize(queryText)));
-  const candidatePool = rankedCandidates.slice(0, Math.max(normalized.topK * 8, 24));
+  const richSemanticMatches = loadOptionalRichSemanticMatches(
+    queryVector,
+    Math.max(normalized.topK * 4, 12),
+  );
+  const candidatePool = rankedCandidates.slice(
+    0,
+    Math.max(normalized.topK * 8, 24),
+  );
   const evidenceResults = await Promise.all(
     candidatePool.map(async (candidate) => ({
       candidate,
-      evidence: await fetchIssueEvidence(candidate.issueNumber)
-    }))
+      evidence: await fetchIssueEvidence(candidate.issueNumber),
+    })),
   );
 
   const matchedEvidence = evidenceResults
     .filter(
-      (result): result is { candidate: RankedCandidate; evidence: QueryIssueResult } =>
-        result.evidence !== null
+      (
+        result,
+      ): result is { candidate: RankedCandidate; evidence: QueryIssueResult } =>
+        result.evidence !== null,
     )
     .filter((result) => result.evidence.evidencePaths.length > 0)
     .map((result) => ({
       ...result,
-      rerankedScore: rerankEvidenceCandidate(queryText, queryTokens, result.candidate, result.evidence)
+      rerankedScore: rerankEvidenceCandidate(
+        queryText,
+        queryTokens,
+        result.candidate,
+        result.evidence,
+      ),
     }))
     .sort(
       (left, right) =>
         right.rerankedScore - left.rerankedScore ||
         right.candidate.score - left.candidate.score ||
-        left.candidate.issueNumber - right.candidate.issueNumber
+        left.candidate.issueNumber - right.candidate.issueNumber,
     )
     .slice(0, normalized.topK);
 
@@ -750,16 +989,26 @@ export async function generateRecommendation(input: RecommendationInput): Promis
     matchedEvidence.length > 0
       ? matchedEvidence.map((result) => ({
           candidate: result.candidate,
-          similarityScore: result.rerankedScore
+          similarityScore: result.rerankedScore,
         }))
       : evidenceResults.slice(0, normalized.topK).map((result) => ({
           candidate: result.candidate,
-          similarityScore: result.candidate.score
+          similarityScore: result.candidate.score,
         }));
   const componentScores = new Map<string, number>();
   const fileScores = new Map<
     string,
-    { file_path: string; component: string; reason: string; score: number }
+    {
+      file_path: string;
+      component: string;
+      reason: string;
+      score: number;
+      line_ranges: Array<{
+        start_line: number;
+        end_line: number;
+        source: string;
+      }>;
+    }
   >();
   let sessionsEvidenceCount = 0;
   let workbenchChatEvidenceCount = 0;
@@ -767,27 +1016,41 @@ export async function generateRecommendation(input: RecommendationInput): Promis
   matchedEvidence.forEach((result, index) => {
     const issueWeight = result.rerankedScore * rankWeight(index);
     const uniqueFiles = result.evidence.likelyFiles;
-    const fileWeight = uniqueFiles.length > 0 ? issueWeight / uniqueFiles.length : issueWeight;
+    const fileWeight =
+      uniqueFiles.length > 0 ? issueWeight / uniqueFiles.length : issueWeight;
 
     for (const file of uniqueFiles) {
-      const relevanceScore = filePathRelevanceScore(queryText, file.path, file.component);
+      const relevanceScore = filePathRelevanceScore(
+        queryText,
+        file.path,
+        file.component,
+      );
       const relevanceBoost = 1 + relevanceScore * 2.5;
       const familyBoost = pathFamilyBoost(queryText, file.path, file.component);
       const specificityPenalty = genericFilePenalty(file.path);
       const existingFile = fileScores.get(file.path);
       const nextScore =
-        (existingFile?.score || 0) + fileWeight * relevanceBoost * familyBoost * specificityPenalty;
+        (existingFile?.score || 0) +
+        fileWeight * relevanceBoost * familyBoost * specificityPenalty;
 
       fileScores.set(file.path, {
         file_path: file.path,
         component: file.component,
         reason: `Referenced by historical PRs ${file.linkedPullRequests.map((value) => `#${value}`).join(", ")}`,
-        score: nextScore
+        score: nextScore,
+        line_ranges: existingFile?.line_ranges || [],
       });
 
       if (file.component !== "Unknown") {
-        const componentAffinity = componentPathAffinityScore(file.component, file.path);
-        const componentPathBoost = pathFamilyBoost(queryText, file.path, file.component);
+        const componentAffinity = componentPathAffinityScore(
+          file.component,
+          file.path,
+        );
+        const componentPathBoost = pathFamilyBoost(
+          queryText,
+          file.path,
+          file.component,
+        );
         const normalizedPath = file.path.toLowerCase();
 
         if (normalizedPath.includes("src/vs/sessions/")) {
@@ -805,18 +1068,69 @@ export async function generateRecommendation(input: RecommendationInput): Promis
               Math.max(0.75, relevanceBoost * 0.75) *
               componentAffinity *
               componentPathBoost *
-              specificityPenalty
+              specificityPenalty,
         );
       }
     }
   });
+
+  for (const match of richSemanticMatches) {
+    if (!match.record.filePath) {
+      continue;
+    }
+
+    const filePath = match.record.filePath;
+    const component = mapFilePathToComponent(filePath);
+    const existingFile = fileScores.get(filePath);
+    const lineRange = formatLineRange(match.record);
+    const newStartLine = match.record.metadata.newStartLine;
+    const newLineCount = match.record.metadata.newLineCount;
+    const reviewLine = match.record.metadata.line;
+    const structuredLineRange =
+      typeof newStartLine === "number" && typeof newLineCount === "number"
+        ? {
+            start_line: newStartLine,
+            end_line: newStartLine + Math.max(newLineCount - 1, 0),
+            source: match.record.id,
+          }
+        : typeof reviewLine === "number"
+          ? {
+              start_line: reviewLine,
+              end_line: reviewLine,
+              source: match.record.id,
+            }
+          : null;
+    const reason =
+      match.record.type === "patch_hunk"
+        ? `Semantic patch match from PR #${match.record.pullRequestNumber} at ${lineRange}`
+        : `Semantic review comment match from PR #${match.record.pullRequestNumber} at ${lineRange}`;
+    const score =
+      match.score * 0.85 +
+      filePathRelevanceScore(queryText, filePath, component) * 0.35;
+    const quality = getPathQuality(filePath);
+
+    fileScores.set(filePath, {
+      file_path: filePath,
+      component,
+      reason: existingFile ? `${existingFile.reason}; ${reason}` : reason,
+      score: (existingFile?.score || 0) + score * quality.score,
+      line_ranges: structuredLineRange
+        ? [...(existingFile?.line_ranges || []), structuredLineRange]
+        : existingFile?.line_ranges || [],
+    });
+  }
 
   const adjustedComponentScores = new Map<string, number>();
 
   for (const [component, score] of componentScores.entries()) {
     adjustedComponentScores.set(
       component,
-      score * componentQueryAffinityScore(component, normalized.title, normalized.description)
+      score *
+        componentQueryAffinityScore(
+          component,
+          normalized.title,
+          normalized.description,
+        ),
     );
   }
 
@@ -842,30 +1156,52 @@ export async function generateRecommendation(input: RecommendationInput): Promis
     lowerQueryText.includes("model");
 
   if (sessionsIntent) {
-    adjustedComponentScores.set("Sessions", (adjustedComponentScores.get("Sessions") || 0) * 1.4 + 0.12);
-    adjustedComponentScores.set("Chat", (adjustedComponentScores.get("Chat") || 0) * 0.74);
+    adjustedComponentScores.set(
+      "Sessions",
+      (adjustedComponentScores.get("Sessions") || 0) * 1.4 + 0.12,
+    );
+    adjustedComponentScores.set(
+      "Chat",
+      (adjustedComponentScores.get("Chat") || 0) * 0.74,
+    );
   }
 
   if (sessionsIntent && sessionsEvidenceCount > 0) {
     const sessionsEvidenceBoost = Math.min(0.18, sessionsEvidenceCount * 0.02);
     adjustedComponentScores.set(
       "Sessions",
-      (adjustedComponentScores.get("Sessions") || 0) + sessionsEvidenceBoost
+      (adjustedComponentScores.get("Sessions") || 0) + sessionsEvidenceBoost,
     );
   }
 
-  if (sessionsIntent && sessionsEvidenceCount >= workbenchChatEvidenceCount && sessionsEvidenceCount > 0) {
-    adjustedComponentScores.set("Sessions", (adjustedComponentScores.get("Sessions") || 0) + 0.08);
-    adjustedComponentScores.set("Chat", (adjustedComponentScores.get("Chat") || 0) * 0.7);
+  if (
+    sessionsIntent &&
+    sessionsEvidenceCount >= workbenchChatEvidenceCount &&
+    sessionsEvidenceCount > 0
+  ) {
+    adjustedComponentScores.set(
+      "Sessions",
+      (adjustedComponentScores.get("Sessions") || 0) + 0.08,
+    );
+    adjustedComponentScores.set(
+      "Chat",
+      (adjustedComponentScores.get("Chat") || 0) * 0.7,
+    );
   }
 
   if (authOrSettingsIntent) {
     adjustedComponentScores.set(
       "Authentication",
-      (adjustedComponentScores.get("Authentication") || 0) * 1.28 + 0.06
+      (adjustedComponentScores.get("Authentication") || 0) * 1.28 + 0.06,
     );
-    adjustedComponentScores.set("Settings", (adjustedComponentScores.get("Settings") || 0) * 1.22 + 0.04);
-    adjustedComponentScores.set("Chat", (adjustedComponentScores.get("Chat") || 0) * 0.78);
+    adjustedComponentScores.set(
+      "Settings",
+      (adjustedComponentScores.get("Settings") || 0) * 1.22 + 0.04,
+    );
+    adjustedComponentScores.set(
+      "Chat",
+      (adjustedComponentScores.get("Chat") || 0) * 0.78,
+    );
   }
 
   const suggestedComponent = topKey(adjustedComponentScores) || "Unknown";
@@ -873,26 +1209,42 @@ export async function generateRecommendation(input: RecommendationInput): Promis
   const fileRows = Array.from(fileScores.values())
     .map((file) => ({
       ...file,
-      score: file.score * (file.component === suggestedComponent ? componentPathAffinityScore(suggestedComponent, file.file_path) : 0.75)
+      score:
+        file.score *
+        (file.component === suggestedComponent
+          ? componentPathAffinityScore(suggestedComponent, file.file_path)
+          : 0.75),
     }))
-    .sort((left, right) => right.score - left.score || left.file_path.localeCompare(right.file_path))
+    .sort(
+      (left, right) =>
+        right.score - left.score ||
+        left.file_path.localeCompare(right.file_path),
+    )
     .slice(0, 10)
-    .map(({ score: _score, ...file }) => file);
+    .map(({ score: _score, line_ranges, ...file }) => ({
+      ...file,
+      ...(line_ranges.length > 0 ? { line_ranges } : {}),
+    }));
 
-  const evidencePath = matchedEvidence.flatMap((result) => result.evidence.evidencePaths).slice(0, 10);
+  const evidencePath = matchedEvidence
+    .flatMap((result) => result.evidence.evidencePaths)
+    .slice(0, 10);
   const topSimilar = similarTickets[0];
 
   return {
     ticket_type: inferTicketType(normalized.title, normalized.description),
     suggested_component: suggestedComponent,
-    suggested_team: suggestedComponent === "Unknown" ? "Unknown" : `${suggestedComponent} Team`,
+    suggested_team:
+      suggestedComponent === "Unknown"
+        ? "Unknown"
+        : `${suggestedComponent} Team`,
     confidence: Number((topSimilar?.candidate.score || 0).toFixed(3)),
     similar_tickets: similarTickets.map((candidate) => ({
       issue_number: candidate.candidate.issueNumber,
       title: candidate.candidate.title,
       similarity_score: Number(candidate.similarityScore.toFixed(3)),
       labels: candidate.candidate.labels,
-      url: candidate.candidate.url
+      url: candidate.candidate.url,
     })),
     likely_impacted_files: fileRows,
     past_fix_pattern:
@@ -902,17 +1254,21 @@ export async function generateRecommendation(input: RecommendationInput): Promis
       ? {
           issue_number: topSimilar.candidate.issueNumber,
           title: topSimilar.candidate.title,
-          confidence: Number(topSimilar.candidate.score.toFixed(3))
+          confidence: Number(topSimilar.candidate.score.toFixed(3)),
         }
       : {
           issue_number: "",
           title: "",
-          confidence: 0
+          confidence: 0,
         },
     evidence_path: evidencePath,
-    missing_information: normalized.description ? [] : ["Ticket description is missing."],
+    missing_information: normalized.description
+      ? []
+      : ["Ticket description is missing."],
     suggested_questions_for_reporter: normalized.description
       ? []
-      : ["Can you provide repro steps, the exact error, and the affected VS Code area?"]
+      : [
+          "Can you provide repro steps, the exact error, and the affected VS Code area?",
+        ],
   };
 }

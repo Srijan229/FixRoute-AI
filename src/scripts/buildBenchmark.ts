@@ -2,17 +2,33 @@ import fs from "node:fs";
 import path from "node:path";
 import { mapFilePathToComponent } from "../lib/componentMapper.js";
 import { logInfo } from "../lib/logger.js";
-import type { BenchmarkCase, GitHubIssue, LinkedPullRequestRecord } from "../lib/types.js";
+import type {
+  BenchmarkCase,
+  GitHubIssue,
+  LinkedPullRequestRecord,
+} from "../lib/types.js";
 
-const ISSUES_PATH = path.resolve(process.cwd(), "data", "raw", "issues", "issues.json");
+const ISSUES_PATH = path.resolve(
+  process.cwd(),
+  "data",
+  "raw",
+  "issues",
+  "issues.json",
+);
 const PULL_REQUESTS_PATH = path.resolve(
   process.cwd(),
   "data",
   "raw",
   "pullRequests",
-  "linkedPullRequests.json"
+  "linkedPullRequests.json",
 );
-const OUTPUT_PATH = path.resolve(process.cwd(), "data", "processed", "evaluation", "benchmark.json");
+const OUTPUT_PATH = path.resolve(
+  process.cwd(),
+  "data",
+  "processed",
+  "evaluation",
+  "benchmark.json",
+);
 
 type Args = {
   limit: number;
@@ -73,7 +89,11 @@ function topComponentForFiles(files: string[]): string {
   return bestComponent;
 }
 
-function inferDifficulty(issue: GitHubIssue, files: string[], pullRequestCount: number): BenchmarkCase["difficulty"] {
+function inferDifficulty(
+  issue: GitHubIssue,
+  files: string[],
+  pullRequestCount: number,
+): BenchmarkCase["difficulty"] {
   const bodyLength = (issue.body || "").length;
 
   if (files.length <= 2 && pullRequestCount === 1 && bodyLength < 500) {
@@ -93,7 +113,10 @@ function difficultyWeight(difficulty: BenchmarkCase["difficulty"]): number {
   return 1;
 }
 
-function selectBalancedCases(cases: CandidateCase[], limit: number): BenchmarkCase[] {
+function selectBalancedCases(
+  cases: CandidateCase[],
+  limit: number,
+): BenchmarkCase[] {
   const byComponent = new Map<string, CandidateCase[]>();
 
   for (const benchmarkCase of cases) {
@@ -104,10 +127,16 @@ function selectBalancedCases(cases: CandidateCase[], limit: number): BenchmarkCa
   }
 
   for (const entries of byComponent.values()) {
-    entries.sort((left, right) => right.sortScore - left.sortScore || left.issue_number - right.issue_number);
+    entries.sort(
+      (left, right) =>
+        right.sortScore - left.sortScore ||
+        left.issue_number - right.issue_number,
+    );
   }
 
-  const components = Array.from(byComponent.keys()).sort((left, right) => left.localeCompare(right));
+  const components = Array.from(byComponent.keys()).sort((left, right) =>
+    left.localeCompare(right),
+  );
   const selected: BenchmarkCase[] = [];
   let added = true;
 
@@ -133,7 +162,7 @@ function selectBalancedCases(cases: CandidateCase[], limit: number): BenchmarkCa
         body: nextCase.body,
         labels: nextCase.labels,
         difficulty: nextCase.difficulty,
-        expected: nextCase.expected
+        expected: nextCase.expected,
       });
       added = true;
     }
@@ -144,13 +173,18 @@ function selectBalancedCases(cases: CandidateCase[], limit: number): BenchmarkCa
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const issues = loadJsonFile<GitHubIssue[]>(ISSUES_PATH, "Missing issues dataset. Run fetch:issues first.");
+  const issues = loadJsonFile<GitHubIssue[]>(
+    ISSUES_PATH,
+    "Missing issues dataset. Run fetch:issues first.",
+  );
   const linkedPullRequests = loadJsonFile<LinkedPullRequestRecord[]>(
     PULL_REQUESTS_PATH,
-    "Missing PR dataset. Run fetch:prs first."
+    "Missing PR dataset. Run fetch:prs first.",
   );
 
-  const issueMap = new Map<number, GitHubIssue>(issues.map((issue) => [issue.number, issue]));
+  const issueMap = new Map<number, GitHubIssue>(
+    issues.map((issue) => [issue.number, issue]),
+  );
   const prsByIssue = new Map<number, LinkedPullRequestRecord[]>();
 
   for (const record of linkedPullRequests) {
@@ -171,12 +205,14 @@ async function main() {
     }
 
     const files = Array.from(
-      new Set(records.flatMap((record) => record.files.map((file) => file.filename)))
+      new Set(
+        records.flatMap((record) => record.files.map((file) => file.filename)),
+      ),
     ).sort((a, b) => a.localeCompare(b));
     const expectedComponent = topComponentForFiles(files);
-    const pullRequestNumbers = Array.from(new Set(records.map((record) => record.pullRequest.number))).sort(
-      (a, b) => a - b
-    );
+    const pullRequestNumbers = Array.from(
+      new Set(records.map((record) => record.pullRequest.number)),
+    ).sort((a, b) => a - b);
 
     if (expectedComponent === "Unknown") {
       continue;
@@ -193,14 +229,16 @@ async function main() {
       issue_number: issue.number,
       title: issue.title,
       body: issue.body || "",
-      labels: issue.labels.map((label) => label.name).sort((a, b) => a.localeCompare(b)),
+      labels: issue.labels
+        .map((label) => label.name)
+        .sort((a, b) => a.localeCompare(b)),
       difficulty,
       expected: {
         component: expectedComponent,
         files,
-        pull_requests: pullRequestNumbers
+        pull_requests: pullRequestNumbers,
       },
-      sortScore
+      sortScore,
     });
   }
 
@@ -208,21 +246,29 @@ async function main() {
   fs.mkdirSync(path.dirname(OUTPUT_PATH), { recursive: true });
   fs.writeFileSync(OUTPUT_PATH, JSON.stringify(selectedCases, null, 2), "utf8");
 
-  const componentBreakdown = selectedCases.reduce<Record<string, number>>((accumulator, benchmarkCase) => {
-    accumulator[benchmarkCase.expected.component] = (accumulator[benchmarkCase.expected.component] || 0) + 1;
-    return accumulator;
-  }, {});
-  const difficultyBreakdown = selectedCases.reduce<Record<string, number>>((accumulator, benchmarkCase) => {
-    accumulator[benchmarkCase.difficulty] = (accumulator[benchmarkCase.difficulty] || 0) + 1;
-    return accumulator;
-  }, {});
+  const componentBreakdown = selectedCases.reduce<Record<string, number>>(
+    (accumulator, benchmarkCase) => {
+      accumulator[benchmarkCase.expected.component] =
+        (accumulator[benchmarkCase.expected.component] || 0) + 1;
+      return accumulator;
+    },
+    {},
+  );
+  const difficultyBreakdown = selectedCases.reduce<Record<string, number>>(
+    (accumulator, benchmarkCase) => {
+      accumulator[benchmarkCase.difficulty] =
+        (accumulator[benchmarkCase.difficulty] || 0) + 1;
+      return accumulator;
+    },
+    {},
+  );
 
   logInfo("Benchmark dataset created", {
     totalEligibleCases: benchmarkCases.length,
     selectedCaseCount: selectedCases.length,
     componentBreakdown,
     difficultyBreakdown,
-    outputPath: OUTPUT_PATH
+    outputPath: OUTPUT_PATH,
   });
 }
 
