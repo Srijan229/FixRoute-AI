@@ -2,6 +2,7 @@ import type { GitHubIssue } from "./types.js";
 import {
   classifyIssueResolution,
   type ImplementationScope,
+  type NewFileLikelihood,
   type ResolutionType,
   type WorkSurface,
 } from "./resolutionType.js";
@@ -28,6 +29,7 @@ export type SemanticIssueProfile = {
   confidence: number;
   evidence_terms: string[];
   new_file_probability: number;
+  new_file_likelihood: NewFileLikelihood;
   existing_file_edit_probability: number;
   non_code_probability: number;
   problem: string;
@@ -256,6 +258,7 @@ export function buildSemanticIssueProfile(
     confidence: resolution.confidence,
     evidence_terms: resolution.evidence_terms,
     new_file_probability: resolution.new_file_probability,
+    new_file_likelihood: resolution.new_file_likelihood,
     existing_file_edit_probability: resolution.existing_file_edit_probability,
     non_code_probability: resolution.non_code_probability,
     problem,
@@ -307,6 +310,7 @@ export function formatSemanticIssueProfile(profile: SemanticIssueProfile): strin
     field("Resolution Reasoning", profile.reasoning),
     field("Resolution Evidence Terms", profile.evidence_terms),
     field("Resolution Confidence", String(profile.confidence)),
+    field("New File Likelihood", profile.new_file_likelihood),
     field("Problem/Symptom", profile.problem),
     field("User Action", profile.userAction),
     field("Expected Behavior", profile.expectedBehavior),

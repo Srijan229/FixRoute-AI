@@ -1,7 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import { buildResolutionGroundTruth } from "../lib/resolutionEvaluation.js";
-import { classifyIssueResolution, type ResolutionType } from "../lib/resolutionType.js";
+import {
+  classifyIssueResolution,
+  type NewFileLikelihood,
+  type ResolutionType,
+} from "../lib/resolutionType.js";
 import { logInfo } from "../lib/logger.js";
 import type { BenchmarkCase, HoldoutSplit, RichDataset } from "../lib/types.js";
 
@@ -60,9 +64,19 @@ type EvaluationRow = {
   actual_created_files: boolean;
   predicted_requires_new_files: boolean;
   new_file_probability: number;
+  new_file_likelihood: NewFileLikelihood;
   confidence: number;
   evidence_terms: string[];
   created_files: string[];
+};
+
+type NewFileDetectionBucket = {
+  count: number;
+  actual_created_file_count: number;
+  likely_precision: number;
+  likely_recall: number;
+  possible_or_likely_precision: number;
+  possible_or_likely_recall: number;
 };
 
 type ResolutionClassifierReport = {
@@ -84,6 +98,14 @@ type ResolutionClassifierReport = {
     existing_bug_recall: number;
   };
   per_class: Record<string, ClassMetrics>;
+  new_file_detection_by_predicted_resolution_type: Record<
+    string,
+    NewFileDetectionBucket
+  >;
+  new_file_detection_by_actual_resolution_type: Record<
+    string,
+    NewFileDetectionBucket
+  >;
   confusion_matrix: Record<string, Record<string, number>>;
   rows: EvaluationRow[];
   likely_misclassified_examples: EvaluationRow[];
@@ -160,6 +182,51 @@ function classMetrics(
   };
 }
 
+function newFileDetectionBucket(rows: EvaluationRow[]): NewFileDetectionBucket {
+  const actualCreated = rows.filter((row) => row.actual_created_files).length;
+  const likelyPredicted = rows.filter(
+    (row) => row.new_file_likelihood === "likely",
+  ).length;
+  const possibleOrLikelyPredicted = rows.filter(
+    (row) => row.new_file_likelihood !== "unlikely",
+  ).length;
+  const likelyTruePositive = rows.filter(
+    (row) => row.actual_created_files && row.new_file_likelihood === "likely",
+  ).length;
+  const possibleOrLikelyTruePositive = rows.filter(
+    (row) => row.actual_created_files && row.new_file_likelihood !== "unlikely",
+  ).length;
+
+  return {
+    count: rows.length,
+    actual_created_file_count: actualCreated,
+    likely_precision: rate(likelyTruePositive, likelyPredicted),
+    likely_recall: rate(likelyTruePositive, actualCreated),
+    possible_or_likely_precision: rate(
+      possibleOrLikelyTruePositive,
+      possibleOrLikelyPredicted,
+    ),
+    possible_or_likely_recall: rate(
+      possibleOrLikelyTruePositive,
+      actualCreated,
+    ),
+  };
+}
+
+function newFileDetectionByBucket(
+  rows: EvaluationRow[],
+  bucketKey: "predicted_resolution_type" | "actual_resolution_type",
+): Record<string, NewFileDetectionBucket> {
+  return Object.fromEntries(
+    RESOLUTION_TYPES.map((resolutionType) => [
+      resolutionType,
+      newFileDetectionBucket(
+        rows.filter((row) => row[bucketKey] === resolutionType),
+      ),
+    ]),
+  );
+}
+
 function saveReport(report: ResolutionClassifierReport): void {
   fs.mkdirSync(path.dirname(OUTPUT_PATH), { recursive: true });
   fs.writeFileSync(OUTPUT_PATH, JSON.stringify(report, null, 2), "utf8");
@@ -201,6 +268,7 @@ async function main() {
       actual_created_files: actual.actual_created_files,
       predicted_requires_new_files: prediction.requires_new_files,
       new_file_probability: prediction.new_file_probability,
+      new_file_likelihood: prediction.new_file_likelihood,
       confidence: prediction.confidence,
       evidence_terms: prediction.evidence_terms,
       created_files: actual.created_files,
@@ -256,6 +324,14 @@ async function main() {
       existing_bug_recall: perClass.existing_bug.recall,
     },
     per_class: perClass,
+    new_file_detection_by_predicted_resolution_type: newFileDetectionByBucket(
+      rows,
+      "predicted_resolution_type",
+    ),
+    new_file_detection_by_actual_resolution_type: newFileDetectionByBucket(
+      rows,
+      "actual_resolution_type",
+    ),
     confusion_matrix: confusionMatrix,
     rows,
     likely_misclassified_examples: rows

@@ -159,6 +159,7 @@ function buildPendingRecords(
           likelySurface: issueProfile.likely_surface.join(", "),
           implementationScope: issueProfile.implementation_scope,
           newFileProbability: issueProfile.new_file_probability,
+          newFileLikelihood: issueProfile.new_file_likelihood,
           existingFileEditProbability:
             issueProfile.existing_file_edit_probability,
           nonCodeProbability: issueProfile.non_code_probability,

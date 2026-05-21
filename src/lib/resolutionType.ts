@@ -21,6 +21,7 @@ export type WorkSurface =
   | "infra";
 
 export type ImplementationScope = "small" | "medium" | "large" | "unknown";
+export type NewFileLikelihood = "likely" | "possible" | "unlikely";
 
 export type ResolutionTypePrediction = {
   resolution_type: ResolutionType;
@@ -34,6 +35,7 @@ export type ResolutionTypePrediction = {
   missing_capability: boolean;
   existing_behavior_broken: boolean;
   new_file_probability: number;
+  new_file_likelihood: NewFileLikelihood;
   existing_file_edit_probability: number;
   non_code_probability: number;
 };
@@ -230,7 +232,7 @@ function hasTitleLevelNewCapabilitySignal(text: string): boolean {
 }
 
 function hasMissingCapabilitySignal(text: string): boolean {
-  return /\b(no way to|missing capability|not possible|cannot currently|feature request|add support for|new feature)\b/.test(
+  return /\b(no way to|missing capability|missing\b.{0,50}\b(skill|capability|support|provider|command|action|feature|view|service|tool)|not possible|cannot currently|feature request|add support for|new feature)\b/.test(
     text,
   );
 }
@@ -256,6 +258,105 @@ function hasActionNounMention(text: string): boolean {
   return /\b(add|export|pin|manage|run|sync|focus|support|feedback)\b.{0,35}\b(button|menu|command|action|widget|view|panel|tool|task|model|option)\b/.test(
     text,
   );
+}
+
+function inferNewFileProbability(input: {
+  text: string;
+  resolutionType: ResolutionType;
+  likelySurface: WorkSurface[];
+  implementationScope: ImplementationScope;
+  missingCapabilitySignal: boolean;
+  strongNewCapabilitySignal: boolean;
+  titleLevelNewCapabilitySignal: boolean;
+  incrementalEnhancementSignal: boolean;
+  actionNounMention: boolean;
+}): number {
+  const {
+    text,
+    resolutionType,
+    likelySurface,
+    implementationScope,
+    missingCapabilitySignal,
+    strongNewCapabilitySignal,
+    titleLevelNewCapabilitySignal,
+    incrementalEnhancementSignal,
+    actionNounMention,
+  } = input;
+  let score =
+    resolutionType === "new_feature"
+      ? 0.5
+      : resolutionType === "enhancement"
+        ? 0.28
+        : resolutionType === "refactor"
+          ? 0.22
+          : resolutionType === "test"
+            ? 0.3
+            : resolutionType === "docs"
+              ? 0.24
+              : resolutionType === "config"
+                ? 0.2
+                : resolutionType === "existing_bug"
+                  ? 0.1
+                  : 0.16;
+
+  if (titleLevelNewCapabilitySignal) score += 0.18;
+  if (strongNewCapabilitySignal) score += 0.1;
+  if (missingCapabilitySignal) score += 0.12;
+  if (incrementalEnhancementSignal) score += 0.1;
+  if (actionNounMention) score += 0.14;
+
+  if (/\b(add|create|introduce|implement|register|expose)\b.{0,60}\b(command|action|provider|service|adapter|parser|renderer|controller|helper|component|view|panel|button|menu|format|type|language|model|tool|task)\b/.test(text)) {
+    score += 0.16;
+  }
+
+  if (/\b(test coverage|add tests?|new test|simulation|fixture|baseline)\b/.test(text)) {
+    score += 0.12;
+  }
+
+  if (/\b(new provider|new type|new format|new command|new action|new service|new renderer|new parser|new helper|built-in support)\b/.test(text)) {
+    score += 0.18;
+  }
+
+  if (/\b(missing|enable|enabled|auto-update|re-enable)\b.{0,70}\b(skill|capability|support|provider|command|action|feature|service|helper|test|simulation|fixture|baseline)\b/.test(text)) {
+    score += 0.16;
+  }
+
+  if (/\b(may need|may require|needs?|requires?|could use)\b.{0,70}\b(parser|helper|helpers|test|tests|fixture|fixtures|adapter|service|provider)\b/.test(text)) {
+    score += 0.14;
+  }
+
+  if (/\b(more commands|subcommand parsing|command parsing|parser helpers)\b/.test(text)) {
+    score += 0.12;
+  }
+
+  if (/\b(matrix of|different types of|connection types|new workspace|all workspaces)\b/.test(text)) {
+    score += 0.12;
+  }
+
+  if (/\b(existing|current|already|regression|previously worked)\b/.test(text)) {
+    score -= 0.06;
+  }
+
+  if (
+    resolutionType === "existing_bug" &&
+    !strongNewCapabilitySignal &&
+    !missingCapabilitySignal &&
+    !/\b(add tests?|fixture|baseline|simulation)\b/.test(text)
+  ) {
+    score -= 0.08;
+  }
+
+  if (implementationScope === "large") score += 0.1;
+  if (likelySurface.includes("test")) score += 0.08;
+  if (likelySurface.includes("ui") && actionNounMention) score += 0.06;
+
+  return clamp(score, 0.05, 0.9);
+}
+
+function classifyNewFileLikelihood(probability: number): NewFileLikelihood {
+  if (probability >= 0.7) return "likely";
+  if (probability >= 0.35) return "possible";
+  return "unlikely";
 }
 
 export function classifyIssueResolution(input: {
@@ -346,14 +447,18 @@ export function classifyIssueResolution(input: {
           )
         ? 0.38
         : 0.12;
-  const newFileProbability =
-    resolutionType === "new_feature"
-      ? 0.72
-      : resolutionType === "enhancement"
-        ? 0.34
-        : resolutionType === "docs" || resolutionType === "test"
-          ? 0.28
-          : 0.12;
+  const newFileProbability = inferNewFileProbability({
+    text,
+    resolutionType,
+    likelySurface,
+    implementationScope,
+    missingCapabilitySignal,
+    strongNewCapabilitySignal,
+    titleLevelNewCapabilitySignal,
+    incrementalEnhancementSignal,
+    actionNounMention,
+  });
+  const newFileLikelihood = classifyNewFileLikelihood(newFileProbability);
   const existingFileEditProbability =
     resolutionType === "existing_bug"
       ? 0.86
@@ -367,7 +472,7 @@ export function classifyIssueResolution(input: {
 
   return {
     resolution_type: resolutionType,
-    requires_new_files: newFileProbability >= 0.5,
+    requires_new_files: newFileLikelihood === "likely",
     requires_existing_file_edits: existingFileEditProbability >= 0.5,
     likely_surface: likelySurface,
     implementation_scope: implementationScope,
@@ -380,6 +485,7 @@ export function classifyIssueResolution(input: {
     missing_capability: missingCapability,
     existing_behavior_broken: existingBehaviorBroken,
     new_file_probability: Number(newFileProbability.toFixed(3)),
+    new_file_likelihood: newFileLikelihood,
     existing_file_edit_probability: Number(
       existingFileEditProbability.toFixed(3),
     ),

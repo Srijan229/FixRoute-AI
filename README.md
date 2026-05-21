@@ -257,6 +257,9 @@ Important reports include:
 - `productEvaluation.json`
 - `resolutionClassifierEvaluation.json`
 
+Compact recommendation examples are available in
+[`docs/recommendation-examples.md`](docs/recommendation-examples.md).
+
 ## Current Evaluation Focus
 
 The most important current metric is routing quality, not global file recall.
@@ -271,6 +274,28 @@ The system is being optimized in this order:
 
 This is deliberate. Many real issues require new implementation or broad
 enhancement work, so exact file recall is not always the right success metric.
+
+Exact file recall should not be used as the only success metric. For new
+features and enhancements, FixRoute AI evaluates whether it chose the right
+resolution type, routing mode, component, area, new-file likelihood, existing
+files to inspect or extend, possible files to create, and supporting historical
+evidence. A slightly lower aggregate file metric can still be a better product
+result if the system avoids overclaiming exact file prediction for work that
+requires planning or new implementation.
+
+New-file prediction is intentionally separate from resolution type:
+
+```json
+{
+  "resolution_type": "enhancement",
+  "new_file_likelihood": "possible",
+  "possible_new_files": []
+}
+```
+
+This lets the system keep conservative issue classification while still warning
+that helper files, tests, providers, commands, or other new implementation files
+may be needed.
 
 ## Neo4j Graph
 

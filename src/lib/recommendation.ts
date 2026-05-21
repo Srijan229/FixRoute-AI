@@ -1078,10 +1078,14 @@ function likelyNewFileSuggestions(input: {
   areas: Array<{ area_path: string; component: string }>;
   mode: RecommendationMode;
   targetComponent: string;
+  newFileProbability: number;
 }): Array<{ file_path: string; component: string; reason: string }> {
   if (
-    input.mode !== "feature_planning" &&
-    input.mode !== "enhancement_planning"
+    input.newFileProbability < 0.35 ||
+    (input.mode !== "feature_planning" &&
+      input.mode !== "enhancement_planning" &&
+      input.mode !== "specialized_routing" &&
+      input.mode !== "general_triage")
   ) {
     return [];
   }
@@ -1102,12 +1106,17 @@ function likelyNewFileSuggestions(input: {
         file_path: sourceFile,
         component: area.component,
         reason:
-          "Candidate new implementation file based on target area and naming conventions.",
+          input.newFileProbability >= 0.7
+            ? "Likely new implementation file based on new-file likelihood, target area, and naming conventions."
+            : "Possible new implementation file based on target area and naming conventions.",
       },
       {
         file_path: testFile,
         component: area.component,
-        reason: "Candidate test file paired with the new implementation file.",
+        reason:
+          input.newFileProbability >= 0.7
+            ? "Likely test file paired with the new implementation file."
+            : "Possible test file paired with the implementation area.",
       },
     ];
   });
@@ -1156,7 +1165,7 @@ function outputGuidanceForMode(mode: RecommendationMode): string {
   }
 
   if (mode === "enhancement_planning") {
-    return "Use likely existing feature areas, files to extend, possible helper files, and similar enhancement patterns.";
+    return "Use likely existing feature areas, files to extend, new-file likelihood, possible helper/test files, and similar enhancement patterns.";
   }
 
   if (mode === "bug_localization") {
@@ -1886,11 +1895,12 @@ export async function generateRecommendation(
     areas: areaRows,
     mode,
     targetComponent: suggestedComponent,
+    newFileProbability: queryProfile.new_file_probability,
   });
   const possibleNewFiles =
-    mode === "enhancement_planning" ? likelyNewFiles : [];
+    queryProfile.new_file_likelihood === "possible" ? likelyNewFiles : [];
   const plannedNewFiles =
-    mode === "feature_planning" ? likelyNewFiles : [];
+    queryProfile.new_file_likelihood === "likely" ? likelyNewFiles : [];
   const likelyNewDirectories = Array.from(
     new Set(
       [...plannedNewFiles, ...possibleNewFiles].map((file) =>
@@ -1927,7 +1937,9 @@ export async function generateRecommendation(
       ? "This issue likely requires new implementation. Not enough evidence for exact file prediction; use likely implementation areas, files to inspect, possible new files, and similar patterns."
       : "",
     mode === "enhancement_planning"
-      ? "This issue likely extends existing behavior. Prioritize files to inspect/extend before creating new files."
+      ? queryProfile.new_file_likelihood === "possible"
+        ? "This issue likely extends existing behavior, but may require one or more new helper or test files. Prioritize files to inspect/extend, then use possible new files as planning hints."
+        : "This issue likely extends existing behavior. Prioritize files to inspect/extend before creating new files."
       : "",
     mode === "general_triage"
       ? "Resolution type is uncertain; human review is recommended before assigning implementation work."
@@ -1949,6 +1961,7 @@ export async function generateRecommendation(
       likely_surface: queryProfile.likely_surface,
       implementation_scope: queryProfile.implementation_scope,
       new_file_probability: queryProfile.new_file_probability,
+      new_file_likelihood: queryProfile.new_file_likelihood,
       existing_file_edit_probability: queryProfile.existing_file_edit_probability,
       non_code_probability: queryProfile.non_code_probability,
       reasoning: queryProfile.reasoning,

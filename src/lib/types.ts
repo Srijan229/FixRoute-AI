@@ -402,6 +402,7 @@ export type RecommendationResult = {
     likely_surface: string[];
     implementation_scope: string;
     new_file_probability: number;
+    new_file_likelihood: "likely" | "possible" | "unlikely";
     existing_file_edit_probability: number;
     non_code_probability: number;
     reasoning: string;

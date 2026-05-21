@@ -367,6 +367,7 @@ function aggregateRecommendation(
       likely_surface: ["service"],
       implementation_scope: "unknown",
       new_file_probability: 0.12,
+      new_file_likelihood: "unlikely",
       existing_file_edit_probability: 0.86,
       non_code_probability: 0.12,
       reasoning: "Validation fallback uses bug-localization routing.",
