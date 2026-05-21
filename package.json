@@ -25,6 +25,7 @@
     "evaluate:agent": "tsx src/scripts/evaluateRecommendation.ts",
     "evaluate:holdout": "tsx src/scripts/evaluateHoldout.ts",
     "evaluate:product": "tsx src/scripts/evaluateProductClaims.ts",
+    "evaluate:resolution": "tsx src/scripts/evaluateResolutionClassifier.ts",
     "validate:product": "tsx src/scripts/validateProduct.ts",
     "query:graph": "tsx src/scripts/queryGraph.ts",
     "query:semantic": "tsx src/scripts/queryRichSemanticIndex.ts",
@@ -32,7 +33,8 @@
     "recommend:ticket": "tsx src/scripts/queryRecommendation.ts",
     "serve:api": "tsx src/server.ts",
     "validate:graph": "tsx src/scripts/validateGraph.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "tsx src/scripts/runTests.ts"
   },
   "dependencies": {
     "dotenv": "^16.4.5",

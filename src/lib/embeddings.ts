@@ -6,6 +6,7 @@ import type {
   IssueEmbeddingRecord,
   RichSemanticIndex,
 } from "./types.js";
+import { buildCanonicalIssueText } from "./issueProfile.js";
 
 type EmbeddingProvider = {
   embedBatch: (texts: string[]) => Promise<number[][]>;
@@ -116,12 +117,11 @@ export function createEmbeddingProvider(): EmbeddingProvider {
 }
 
 export function buildIssueEmbeddingText(issue: GitHubIssue): string {
-  const labels = issue.labels.map((label) => label.name).join(" ");
-
-  return [issue.title, labels, issue.body ?? ""]
-    .map((part) => part.trim())
-    .filter((part) => part.length > 0)
-    .join("\n\n");
+  return buildCanonicalIssueText({
+    title: issue.title,
+    body: issue.body,
+    labels: issue.labels.map((label) => label.name),
+  });
 }
 
 export function getEmbeddingsFilePath(): string {
@@ -133,6 +133,14 @@ export function getRichSemanticIndexFilePath(): string {
     process.cwd(),
     process.env.RICH_SEMANTIC_INDEX_FILE_PATH ||
       "data/processed/semantic/richSemanticIndex.json",
+  );
+}
+
+export function getCodeSemanticIndexFilePath(): string {
+  return path.resolve(
+    process.cwd(),
+    process.env.CODE_SEMANTIC_INDEX_FILE_PATH ||
+      "data/processed/semantic/codeSemanticIndex.json",
   );
 }
 
@@ -166,6 +174,18 @@ export function loadRichSemanticIndex(): RichSemanticIndex {
   if (!fs.existsSync(inputPath)) {
     throw new Error(
       "Missing rich semantic index. Run create:rich-semantic-index first.",
+    );
+  }
+
+  return JSON.parse(fs.readFileSync(inputPath, "utf8")) as RichSemanticIndex;
+}
+
+export function loadCodeSemanticIndex(): RichSemanticIndex {
+  const inputPath = getCodeSemanticIndexFilePath();
+
+  if (!fs.existsSync(inputPath)) {
+    throw new Error(
+      "Missing code semantic index. Run create:code-semantic-index first.",
     );
   }
 

@@ -337,6 +337,7 @@ export type SemanticRecordType =
   | "review"
   | "review_comment"
   | "patch_hunk"
+  | "implementation_pattern"
   | "code_chunk";
 
 export type RichSemanticRecord = {
@@ -367,6 +368,95 @@ export type RichSemanticIndex = {
 };
 
 export type RecommendationResult = {
+  mode:
+    | "bug_localization"
+    | "feature_planning"
+    | "enhancement_planning"
+    | "specialized_routing"
+    | "general_triage";
+  resolution_type:
+    | "existing_bug"
+    | "new_feature"
+    | "enhancement"
+    | "enhancement_with_new_files"
+    | "refactor"
+    | "docs"
+    | "config"
+    | "test"
+    | "unknown";
+  likely_components: Array<{
+    component: string;
+    reason: string;
+    confidence: number;
+  }>;
+  likely_areas: Array<{
+    area_path: string;
+    component: string;
+    reason: string;
+    supporting_files: string[];
+  }>;
+  limitations: string[];
+  routing: {
+    requires_new_files: boolean;
+    requires_existing_file_edits: boolean;
+    likely_surface: string[];
+    implementation_scope: string;
+    new_file_probability: number;
+    existing_file_edit_probability: number;
+    non_code_probability: number;
+    reasoning: string;
+    evidence_terms: string[];
+    confidence_label: string;
+    output_guidance: string;
+  };
+  likely_existing_files: Array<{
+    file_path: string;
+    component: string;
+    reason: string;
+  }>;
+  existing_files_to_inspect: Array<{
+    file_path: string;
+    component: string;
+    reason: string;
+  }>;
+  existing_files_to_extend: Array<{
+    file_path: string;
+    component: string;
+    reason: string;
+  }>;
+  likely_new_files: Array<{
+    file_path: string;
+    component: string;
+    reason: string;
+  }>;
+  possible_new_files: Array<{
+    file_path: string;
+    component: string;
+    reason: string;
+  }>;
+  likely_new_directories: string[];
+  similar_implementation_patterns: Array<{
+    pattern_name: string;
+    summary: string;
+    score: number;
+    example_prs: number[];
+  }>;
+  similar_feature_prs: Array<{
+    pull_request_number: number;
+    title: string;
+    url?: string;
+  }>;
+  similar_fix_prs: Array<{
+    pull_request_number: number;
+    title: string;
+    url?: string;
+  }>;
+  similar_enhancements: Array<{
+    pull_request_number: number;
+    title: string;
+    url?: string;
+  }>;
+  suggested_implementation_steps: string[];
   ticket_type: string;
   suggested_component: string;
   suggested_team: string;
@@ -382,11 +472,12 @@ export type RecommendationResult = {
     file_path: string;
     component: string;
     reason: string;
-    line_ranges?: Array<{
-      start_line: number;
-      end_line: number;
-      source: string;
-    }>;
+  }>;
+  likely_impacted_areas: Array<{
+    area_path: string;
+    component: string;
+    reason: string;
+    supporting_files: string[];
   }>;
   past_fix_pattern: string;
   possible_duplicate: {

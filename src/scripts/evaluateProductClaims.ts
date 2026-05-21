@@ -5,6 +5,7 @@ import {
   loadRichSemanticIndex,
 } from "../lib/embeddings.js";
 import { generateRecommendation } from "../lib/recommendation.js";
+import { buildResolutionGroundTruth } from "../lib/resolutionEvaluation.js";
 import { mapFilePathToComponent } from "../lib/componentMapper.js";
 import { logInfo } from "../lib/logger.js";
 import { getPathQuality } from "../lib/pathQuality.js";
@@ -13,6 +14,7 @@ import type {
   HoldoutSplit,
   PatchHunk,
   RecommendationResult,
+  RichDataset,
 } from "../lib/types.js";
 
 const HOLDOUT_PATH = path.resolve(
@@ -28,6 +30,13 @@ const PATCH_HUNKS_PATH = path.resolve(
   "processed",
   "patches",
   "patchHunks.json",
+);
+const RICH_DATASET_PATH = path.resolve(
+  process.cwd(),
+  "data",
+  "processed",
+  "normalized",
+  "richDataset.json",
 );
 const OUTPUT_PATH = path.resolve(
   process.cwd(),
@@ -68,13 +77,14 @@ type ProductEvaluationReport = {
   metrics: {
     component_accuracy: number;
     component_top3_accuracy: number;
+    area_recall_at_3: number;
+    area_recall_at_5: number;
     file_recall_at_5: number;
     file_recall_at_10: number;
     file_precision_at_5: number;
     focused_file_recall_at_5: number;
     focused_file_recall_at_10: number;
-    line_range_overlap_rate: number;
-    patch_hunk_file_hit_rate: number;
+    historical_patch_file_hit_rate: number;
     similar_issue_self_leak_rate: number;
     evidence_path_validity_rate: number;
     unknown_component_rate: number;
@@ -83,6 +93,7 @@ type ProductEvaluationReport = {
   thresholds: {
     component_accuracy_target: number;
     component_top3_accuracy_target: number;
+    area_recall_at_5_target: number;
     focused_file_recall_at_5_target: number;
     component_aligned_file_hit_rate_target: number;
     evidence_path_validity_rate_target: number;
@@ -97,14 +108,36 @@ type ProductEvaluationReport = {
       focused_file_recall_at_5: number;
     }
   >;
+  by_resolution_type: Record<
+    string,
+    {
+      case_count: number;
+      component_accuracy: number;
+      area_recall_at_5: number;
+      file_recall_at_5: number;
+      existing_files_to_extend_recall_at_5: number;
+      new_file_needed_precision: number;
+      new_file_needed_recall: number;
+      created_file_case_count: number;
+    }
+  >;
+  by_created_files: Record<
+    "created_files" | "no_created_files",
+    {
+      case_count: number;
+      component_accuracy: number;
+      area_recall_at_5: number;
+      file_recall_at_5: number;
+    }
+  >;
   failures: Array<{
     issue_number: number;
     expected_component: string;
     predicted_component: string;
+    expected_areas: string[];
+    predicted_areas: string[];
     expected_files: string[];
     predicted_files: string[];
-    expected_line_ranges: LineRange[];
-    predicted_line_ranges: LineRange[];
     possible_duplicate: number | string;
     failure_reasons: string[];
   }>;
@@ -156,6 +189,36 @@ function recall(expectedItems: string[], predictedItems: string[]): number {
     predictedItems.includes(item),
   ).length;
   return hits / expectedItems.length;
+}
+
+function impactAreaForFile(filePath: string): string {
+  const parts = filePath.split("/");
+
+  if (parts.length <= 2) {
+    return parts[0] || filePath;
+  }
+
+  if (filePath.startsWith("src/vs/workbench/contrib/") && parts.length >= 5) {
+    return parts.slice(0, Math.min(parts.length - 1, 7)).join("/");
+  }
+
+  if (filePath.startsWith("src/vs/platform/") && parts.length >= 5) {
+    return parts.slice(0, Math.min(parts.length - 1, 6)).join("/");
+  }
+
+  if (filePath.startsWith("src/vs/editor/") && parts.length >= 5) {
+    return parts.slice(0, Math.min(parts.length - 1, 6)).join("/");
+  }
+
+  if (filePath.startsWith("src/vs/sessions/") && parts.length >= 5) {
+    return parts.slice(0, Math.min(parts.length - 1, 6)).join("/");
+  }
+
+  if (filePath.startsWith("extensions/") && parts.length >= 4) {
+    return parts.slice(0, Math.min(parts.length - 1, 5)).join("/");
+  }
+
+  return parts.slice(0, Math.min(parts.length - 1, 4)).join("/") || filePath;
 }
 
 function filePriorityScore(
@@ -236,33 +299,34 @@ function expectedLineRangesForCase(
     }));
 }
 
-function predictedLineRanges(
-  recommendation: RecommendationResult,
-): LineRange[] {
-  return recommendation.likely_impacted_files.flatMap((file) =>
-    (file.line_ranges || []).map((range) => ({
-      filePath: file.file_path,
-      startLine: range.start_line,
-      endLine: range.end_line,
-    })),
-  );
-}
+function buildCreatedFileLookup(dataset: RichDataset | null): Map<number, Set<string>> {
+  const lookup = new Map<number, Set<string>>();
 
-function rangesOverlap(left: LineRange, right: LineRange): boolean {
-  return (
-    left.filePath === right.filePath &&
-    left.startLine <= right.endLine &&
-    right.startLine <= left.endLine
-  );
-}
+  if (!dataset) {
+    return lookup;
+  }
 
-function hasLineRangeOverlap(
-  expectedRanges: LineRange[],
-  predictedRanges: LineRange[],
-): boolean {
-  return expectedRanges.some((expected) =>
-    predictedRanges.some((predicted) => rangesOverlap(expected, predicted)),
-  );
+  for (const record of dataset.pullRequests) {
+    const createdFiles = record.files
+      .filter((file) => file.status === "added")
+      .map((file) => file.filename);
+
+    if (createdFiles.length === 0) {
+      continue;
+    }
+
+    for (const issueNumber of record.linkedIssueNumbers) {
+      const current = lookup.get(issueNumber) ?? new Set<string>();
+
+      for (const filePath of createdFiles) {
+        current.add(filePath);
+      }
+
+      lookup.set(issueNumber, current);
+    }
+  }
+
+  return lookup;
 }
 
 function hasPatchHunkFileHit(
@@ -343,9 +407,17 @@ async function main() {
     "Missing holdout split. Run build:holdout first.",
   );
   const patchHunks = loadOptionalJsonFile<PatchHunk[]>(PATCH_HUNKS_PATH, []);
+  const richDataset = loadOptionalJsonFile<RichDataset | null>(
+    RICH_DATASET_PATH,
+    null,
+  );
   const cases = args.limit
     ? holdoutSplit.test_cases.slice(0, args.limit)
     : holdoutSplit.test_cases;
+  const createdFileLookup = buildCreatedFileLookup(richDataset);
+  const resolutionGroundTruth = richDataset
+    ? buildResolutionGroundTruth(cases, richDataset)
+    : new Map();
   const testIssueNumbers = new Set(
     holdoutSplit.test_cases.map((testCase) => testCase.issue_number),
   );
@@ -353,12 +425,13 @@ async function main() {
 
   let componentCorrect = 0;
   let componentTop3Correct = 0;
+  let areaRecallAt3Total = 0;
+  let areaRecallAt5Total = 0;
   let fileRecallAt5Total = 0;
   let fileRecallAt10Total = 0;
   let filePrecisionAt5Total = 0;
   let focusedFileRecallAt5Total = 0;
   let focusedFileRecallAt10Total = 0;
-  let lineRangeOverlapCount = 0;
   let patchHunkFileHitCount = 0;
   let similarIssueSelfLeakCount = 0;
   let validEvidencePathCount = 0;
@@ -368,6 +441,29 @@ async function main() {
   const perComponentStats = new Map<
     string,
     { count: number; componentCorrect: number; focusedRecallAt5Total: number }
+  >();
+  const byResolutionTypeStats = new Map<
+    string,
+    {
+      count: number;
+      componentCorrect: number;
+      areaRecallAt5Total: number;
+      fileRecallAt5Total: number;
+      extendRecallAt5Total: number;
+      newFilePredicted: number;
+      newFileActual: number;
+      newFileTruePositive: number;
+      createdFileCases: number;
+    }
+  >();
+  const byCreatedFileStats = new Map<
+    "created_files" | "no_created_files",
+    {
+      count: number;
+      componentCorrect: number;
+      areaRecallAt5Total: number;
+      fileRecallAt5Total: number;
+    }
   >();
   const failures: ProductEvaluationReport["failures"] = [];
 
@@ -384,16 +480,35 @@ async function main() {
     const predictedFilesAt10 = recommendation.likely_impacted_files
       .slice(0, 10)
       .map((file) => file.file_path);
+    const predictedExtendFilesAt5 = recommendation.existing_files_to_extend
+      .slice(0, 5)
+      .map((file) => file.file_path);
     const expectedFiles = benchmarkCase.expected.files;
+    const createdFilesForCase = Array.from(
+      createdFileLookup.get(benchmarkCase.issue_number) ?? [],
+    );
+    const actualResolutionType =
+      resolutionGroundTruth.get(benchmarkCase.issue_number)
+        ?.actual_resolution_type || recommendation.resolution_type;
+    const hasCreatedFiles = createdFilesForCase.length > 0;
     const focusedExpectedFiles = deriveFocusedExpectedFiles(benchmarkCase);
+    const expectedAreas = unique(
+      focusedExpectedFiles.map((filePath) => impactAreaForFile(filePath)),
+    );
+    const predictedAreasAt3 = recommendation.likely_impacted_areas
+      .slice(0, 3)
+      .map((area) => area.area_path);
+    const predictedAreasAt5 = recommendation.likely_impacted_areas
+      .slice(0, 5)
+      .map((area) => area.area_path);
     const expectedRanges = expectedLineRangesForCase(benchmarkCase, patchHunks);
-    const predictedRanges = predictedLineRanges(recommendation);
     const top3Components = unique(
       recommendation.likely_impacted_files
         .map((file) => file.component)
         .filter((component) => component !== "Unknown"),
     ).slice(0, 3);
     const fileRecallAt5 = recall(expectedFiles, predictedFilesAt5);
+    const extendRecallAt5 = recall(expectedFiles, predictedExtendFilesAt5);
     const fileRecallAt10 = recall(expectedFiles, predictedFilesAt10);
     const focusedFileRecallAt5 = recall(
       focusedExpectedFiles,
@@ -403,6 +518,8 @@ async function main() {
       focusedExpectedFiles,
       predictedFilesAt10,
     );
+    const areaRecallAt3 = recall(expectedAreas, predictedAreasAt3);
+    const areaRecallAt5 = recall(expectedAreas, predictedAreasAt5);
     const fileHitsAt5 = expectedFiles.filter((file) =>
       predictedFilesAt5.includes(file),
     ).length;
@@ -410,10 +527,6 @@ async function main() {
       predictedFilesAt5.length > 0 ? fileHitsAt5 / predictedFilesAt5.length : 0;
     const componentAlignedFileHit = recommendation.likely_impacted_files.some(
       (file) => file.component === benchmarkCase.expected.component,
-    );
-    const lineRangeOverlap = hasLineRangeOverlap(
-      expectedRanges,
-      predictedRanges,
     );
     const patchHunkFileHit = hasPatchHunkFileHit(
       expectedRanges,
@@ -430,10 +543,32 @@ async function main() {
       componentCorrect: 0,
       focusedRecallAt5Total: 0,
     };
+    const resolutionStats = byResolutionTypeStats.get(
+      actualResolutionType,
+    ) || {
+      count: 0,
+      componentCorrect: 0,
+      areaRecallAt5Total: 0,
+      fileRecallAt5Total: 0,
+      extendRecallAt5Total: 0,
+      newFilePredicted: 0,
+      newFileActual: 0,
+      newFileTruePositive: 0,
+      createdFileCases: 0,
+    };
+    const createdBucket = hasCreatedFiles ? "created_files" : "no_created_files";
+    const createdStats = byCreatedFileStats.get(createdBucket) || {
+      count: 0,
+      componentCorrect: 0,
+      areaRecallAt5Total: 0,
+      fileRecallAt5Total: 0,
+    };
 
     if (predictedComponent === benchmarkCase.expected.component) {
       componentCorrect += 1;
       componentStats.componentCorrect += 1;
+      resolutionStats.componentCorrect += 1;
+      createdStats.componentCorrect += 1;
     } else {
       failureReasons.push("component_mismatch");
     }
@@ -456,16 +591,12 @@ async function main() {
       failureReasons.push("no_component_aligned_file");
     }
 
-    if (expectedRanges.length > 0 && lineRangeOverlap) {
-      lineRangeOverlapCount += 1;
-    }
-
     if (expectedRanges.length > 0 && patchHunkFileHit) {
       patchHunkFileHitCount += 1;
     }
 
-    if (expectedRanges.length > 0 && !lineRangeOverlap) {
-      failureReasons.push("no_line_range_overlap");
+    if (areaRecallAt5 === 0) {
+      failureReasons.push("no_impact_area_hit_at_5");
     }
 
     if (focusedFileRecallAt5 === 0) {
@@ -490,19 +621,38 @@ async function main() {
     filePrecisionAt5Total += filePrecisionAt5;
     focusedFileRecallAt5Total += focusedFileRecallAt5;
     focusedFileRecallAt10Total += focusedFileRecallAt10;
+    areaRecallAt3Total += areaRecallAt3;
+    areaRecallAt5Total += areaRecallAt5;
     componentStats.count += 1;
     componentStats.focusedRecallAt5Total += focusedFileRecallAt5;
     perComponentStats.set(benchmarkCase.expected.component, componentStats);
+    resolutionStats.count += 1;
+    resolutionStats.areaRecallAt5Total += areaRecallAt5;
+    resolutionStats.fileRecallAt5Total += fileRecallAt5;
+    resolutionStats.extendRecallAt5Total += extendRecallAt5;
+    resolutionStats.newFilePredicted += recommendation.routing
+      .requires_new_files
+      ? 1
+      : 0;
+    resolutionStats.newFileActual += hasCreatedFiles ? 1 : 0;
+    resolutionStats.newFileTruePositive +=
+      recommendation.routing.requires_new_files && hasCreatedFiles ? 1 : 0;
+    resolutionStats.createdFileCases += hasCreatedFiles ? 1 : 0;
+    byResolutionTypeStats.set(actualResolutionType, resolutionStats);
+    createdStats.count += 1;
+    createdStats.areaRecallAt5Total += areaRecallAt5;
+    createdStats.fileRecallAt5Total += fileRecallAt5;
+    byCreatedFileStats.set(createdBucket, createdStats);
 
     if (failureReasons.length > 0) {
       failures.push({
         issue_number: benchmarkCase.issue_number,
         expected_component: benchmarkCase.expected.component,
         predicted_component: predictedComponent,
+        expected_areas: expectedAreas,
+        predicted_areas: predictedAreasAt5,
         expected_files: expectedFiles,
         predicted_files: predictedFilesAt5,
-        expected_line_ranges: expectedRanges.slice(0, 10),
-        predicted_line_ranges: predictedRanges.slice(0, 10),
         possible_duplicate: recommendation.possible_duplicate.issue_number,
         failure_reasons: failureReasons,
       });
@@ -516,6 +666,7 @@ async function main() {
   const thresholds = {
     component_accuracy_target: 0.6,
     component_top3_accuracy_target: 0.8,
+    area_recall_at_5_target: 0.35,
     focused_file_recall_at_5_target: 0.35,
     component_aligned_file_hit_rate_target: 0.75,
     evidence_path_validity_rate_target: 0.95,
@@ -523,13 +674,17 @@ async function main() {
   const metrics = {
     component_accuracy: rate(componentCorrect, cases.length),
     component_top3_accuracy: rate(componentTop3Correct, cases.length),
+    area_recall_at_3: rate(areaRecallAt3Total, cases.length),
+    area_recall_at_5: rate(areaRecallAt5Total, cases.length),
     file_recall_at_5: rate(fileRecallAt5Total, cases.length),
     file_recall_at_10: rate(fileRecallAt10Total, cases.length),
     file_precision_at_5: rate(filePrecisionAt5Total, cases.length),
     focused_file_recall_at_5: rate(focusedFileRecallAt5Total, cases.length),
     focused_file_recall_at_10: rate(focusedFileRecallAt10Total, cases.length),
-    line_range_overlap_rate: rate(lineRangeOverlapCount, lineEvaluableCases),
-    patch_hunk_file_hit_rate: rate(patchHunkFileHitCount, lineEvaluableCases),
+    historical_patch_file_hit_rate: rate(
+      patchHunkFileHitCount,
+      lineEvaluableCases,
+    ),
     similar_issue_self_leak_rate: rate(similarIssueSelfLeakCount, cases.length),
     evidence_path_validity_rate: rate(
       validEvidencePathCount,
@@ -546,6 +701,7 @@ async function main() {
     metrics.component_accuracy >= thresholds.component_accuracy_target &&
     metrics.component_top3_accuracy >=
       thresholds.component_top3_accuracy_target &&
+    metrics.area_recall_at_5 >= thresholds.area_recall_at_5_target &&
     metrics.focused_file_recall_at_5 >=
       thresholds.focused_file_recall_at_5_target &&
     metrics.component_aligned_file_hit_rate >=
@@ -555,7 +711,7 @@ async function main() {
 
   const report: ProductEvaluationReport = {
     claim_under_test:
-      "Given a new GitHub issue title/body, FixRoute AI predicts likely component, impacted files, line-range evidence, similar historical tickets, and evidence paths.",
+      "Given a new GitHub issue title/body, FixRoute AI classifies the engineering work type, then routes to likely components, areas, existing files to inspect or extend, possible new files, implementation patterns, similar historical tickets, and evidence paths.",
     valid_for_product_claims: !leakage.detected,
     leakage,
     dataset: {
@@ -591,6 +747,64 @@ async function main() {
           },
         ]),
     ),
+    by_resolution_type: Object.fromEntries(
+      Array.from(byResolutionTypeStats.entries())
+        .sort((left, right) => left[0].localeCompare(right[0]))
+        .map(([resolutionType, stats]) => [
+          resolutionType,
+          {
+            case_count: stats.count,
+            component_accuracy: rate(stats.componentCorrect, stats.count),
+            area_recall_at_5: rate(stats.areaRecallAt5Total, stats.count),
+            file_recall_at_5: rate(stats.fileRecallAt5Total, stats.count),
+            existing_files_to_extend_recall_at_5: rate(
+              stats.extendRecallAt5Total,
+              stats.count,
+            ),
+            new_file_needed_precision: rate(
+              stats.newFileTruePositive,
+              stats.newFilePredicted,
+            ),
+            new_file_needed_recall: rate(
+              stats.newFileTruePositive,
+              stats.newFileActual,
+            ),
+            created_file_case_count: stats.createdFileCases,
+          },
+        ]),
+    ),
+    by_created_files: {
+      created_files: {
+        case_count: byCreatedFileStats.get("created_files")?.count || 0,
+        component_accuracy: rate(
+          byCreatedFileStats.get("created_files")?.componentCorrect || 0,
+          byCreatedFileStats.get("created_files")?.count || 0,
+        ),
+        area_recall_at_5: rate(
+          byCreatedFileStats.get("created_files")?.areaRecallAt5Total || 0,
+          byCreatedFileStats.get("created_files")?.count || 0,
+        ),
+        file_recall_at_5: rate(
+          byCreatedFileStats.get("created_files")?.fileRecallAt5Total || 0,
+          byCreatedFileStats.get("created_files")?.count || 0,
+        ),
+      },
+      no_created_files: {
+        case_count: byCreatedFileStats.get("no_created_files")?.count || 0,
+        component_accuracy: rate(
+          byCreatedFileStats.get("no_created_files")?.componentCorrect || 0,
+          byCreatedFileStats.get("no_created_files")?.count || 0,
+        ),
+        area_recall_at_5: rate(
+          byCreatedFileStats.get("no_created_files")?.areaRecallAt5Total || 0,
+          byCreatedFileStats.get("no_created_files")?.count || 0,
+        ),
+        file_recall_at_5: rate(
+          byCreatedFileStats.get("no_created_files")?.fileRecallAt5Total || 0,
+          byCreatedFileStats.get("no_created_files")?.count || 0,
+        ),
+      },
+    },
     failures: failures.slice(0, 50),
   };
 

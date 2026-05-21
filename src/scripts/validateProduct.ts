@@ -147,6 +147,11 @@ function rankWeight(index: number): number {
   return 1 / (index + 1);
 }
 
+function impactAreaForFile(filePath: string): string {
+  const parts = filePath.split("/");
+  return parts.slice(0, Math.min(parts.length - 1, 6)).join("/") || filePath;
+}
+
 function filePriorityScore(
   filePath: string,
   expectedComponent: string,
@@ -303,12 +308,84 @@ function aggregateRecommendation(
     )
     .slice(0, 10)
     .map(({ score: _score, ...file }) => file);
+  const areaMap = new Map<
+    string,
+    {
+      area_path: string;
+      component: string;
+      reason: string;
+      supporting_files: Set<string>;
+    }
+  >();
+
+  for (const file of topFiles) {
+    const areaPath = impactAreaForFile(file.file_path);
+    const existingArea = areaMap.get(areaPath);
+
+    areaMap.set(areaPath, {
+      area_path: areaPath,
+      component: existingArea?.component || file.component,
+      reason:
+        existingArea?.reason ||
+        `Historical fixes touched files under ${areaPath}`,
+      supporting_files: new Set([
+        ...(existingArea?.supporting_files || []),
+        file.file_path,
+      ]),
+    });
+  }
+
+  const topAreas = Array.from(areaMap.values())
+    .slice(0, 8)
+    .map(({ supporting_files, ...area }) => ({
+      ...area,
+      supporting_files: Array.from(supporting_files.values()).slice(0, 5),
+    }));
   const evidencePath = evidenceRows
     .flatMap((row) => row.evidence.evidencePaths)
     .slice(0, 10);
   const topCandidate = candidates[0];
 
   return {
+    mode: "bug_localization",
+    resolution_type: "existing_bug",
+    likely_components:
+      suggestedComponent === "Unknown"
+        ? []
+        : [
+            {
+              component: suggestedComponent,
+              reason: "Lexical graph validation fallback.",
+              confidence: Number((topCandidate?.score || 0).toFixed(3)),
+            },
+          ],
+    likely_areas: topAreas,
+    limitations: [],
+    routing: {
+      requires_new_files: false,
+      requires_existing_file_edits: true,
+      likely_surface: ["service"],
+      implementation_scope: "unknown",
+      new_file_probability: 0.12,
+      existing_file_edit_probability: 0.86,
+      non_code_probability: 0.12,
+      reasoning: "Validation fallback uses bug-localization routing.",
+      evidence_terms: [],
+      confidence_label: "medium",
+      output_guidance:
+        "Use likely existing files as investigation starting points, not guaranteed bug locations.",
+    },
+    likely_existing_files: topFiles,
+    existing_files_to_inspect: [],
+    existing_files_to_extend: [],
+    likely_new_files: [],
+    possible_new_files: [],
+    likely_new_directories: [],
+    similar_implementation_patterns: [],
+    similar_feature_prs: [],
+    similar_fix_prs: [],
+    similar_enhancements: [],
+    suggested_implementation_steps: [],
     ticket_type: "unknown",
     suggested_component: suggestedComponent,
     suggested_team:
@@ -324,6 +401,7 @@ function aggregateRecommendation(
       url: candidate.url,
     })),
     likely_impacted_files: topFiles,
+    likely_impacted_areas: topAreas,
     past_fix_pattern:
       evidenceRows[0]?.evidence.linkedPullRequests[0]?.title ||
       "Review the linked historical pull requests for recurring file and component patterns.",

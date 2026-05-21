@@ -8,6 +8,18 @@ import {
 } from "../lib/embeddings.js";
 import { logInfo } from "../lib/logger.js";
 import { getPatchHunkQuality, getPathQuality } from "../lib/pathQuality.js";
+import {
+  buildSemanticIssueProfileFromIssue,
+  formatSemanticIssueProfile,
+} from "../lib/issueProfile.js";
+import {
+  buildSemanticFixProfile,
+  formatSemanticFixProfile,
+} from "../lib/fixProfile.js";
+import {
+  buildImplementationPattern,
+  formatImplementationPattern,
+} from "../lib/implementationPattern.js";
 import type {
   RichDataset,
   RichSemanticIndex,
@@ -115,6 +127,10 @@ function buildPendingRecords(
     const labels = issue.labels
       .map((label) => label.name)
       .sort((a, b) => a.localeCompare(b));
+    const issueProfile = buildSemanticIssueProfileFromIssue(
+      issue,
+      richIssue.comments.slice(0, 5).map((comment) => comment.body),
+    );
 
     records.push(
       makeRecord({
@@ -125,15 +141,9 @@ function buildPendingRecords(
         url: issue.html_url,
         labels,
         text: compactText([
-          `Issue #${issue.number}: ${issue.title}`,
+          `Canonical issue profile for issue #${issue.number}`,
+          formatSemanticIssueProfile(issueProfile),
           `Labels: ${labelsText(issue.labels)}`,
-          issue.body,
-          richIssue.comments.length > 0
-            ? `Comment excerpts:\n${richIssue.comments
-                .slice(0, 5)
-                .map((comment) => comment.body || "")
-                .join("\n\n")}`
-            : null,
         ]),
         metadata: {
           state: issue.state,
@@ -142,6 +152,19 @@ function buildPendingRecords(
           closedAt: issue.closed_at,
           commentCount: richIssue.comments.length,
           timelineEventCount: richIssue.timelineEvents.length,
+          uiArea: issueProfile.uiArea,
+          resolutionType: issueProfile.resolution_type,
+          requiresNewFiles: issueProfile.requires_new_files,
+          requiresExistingFileEdits: issueProfile.requires_existing_file_edits,
+          likelySurface: issueProfile.likely_surface.join(", "),
+          implementationScope: issueProfile.implementation_scope,
+          newFileProbability: issueProfile.new_file_probability,
+          existingFileEditProbability:
+            issueProfile.existing_file_edit_probability,
+          nonCodeProbability: issueProfile.non_code_probability,
+          componentHints: issueProfile.componentHints.join(", "),
+          mentionedFileCount: issueProfile.mentionedFiles.length,
+          mentionedSymbolCount: issueProfile.symbols.length,
         },
       }),
     );
@@ -170,6 +193,20 @@ function buildPendingRecords(
 
   for (const record of dataset.pullRequests) {
     const pullRequest = record.pullRequest;
+    const fixProfile = buildSemanticFixProfile({
+      pullRequest,
+      files: record.files,
+      commits: record.commits,
+      reviews: record.reviews,
+      reviewComments: record.reviewComments,
+      patchHunks: record.patchHunks,
+    });
+    const implementationPattern = buildImplementationPattern({
+      pullRequest,
+      files: record.files,
+      commits: record.commits,
+      patchHunks: record.patchHunks,
+    });
     const linkedIssueNumbers = allowedIssueNumbers
       ? record.linkedIssueNumbers.filter((issueNumber) =>
           allowedIssueNumbers.has(issueNumber),
@@ -188,10 +225,10 @@ function buildPendingRecords(
         title: pullRequest.title,
         url: pullRequest.html_url,
         text: compactText([
-          `Pull Request #${pullRequest.number}: ${pullRequest.title}`,
+          `Canonical fix profile for PR #${pullRequest.number}: ${pullRequest.title}`,
+          formatSemanticFixProfile(fixProfile),
           pullRequest.body,
           `Linked issues: ${linkedIssueNumbers.join(", ")}`,
-          `Changed files:\n${record.files.map((file) => file.filename).join("\n")}`,
           `Commit messages:\n${(record.commits || []).map((commit) => commit.commit.message).join("\n\n")}`,
         ]),
         metadata: {
@@ -202,6 +239,52 @@ function buildPendingRecords(
           commitCount: record.commits?.length || 0,
           reviewCount: record.reviews.length,
           reviewCommentCount: record.reviewComments.length,
+          primaryFiles: fixProfile.primaryFiles.join("\n"),
+          primaryAreas: fixProfile.primaryAreas.join("\n"),
+          components: fixProfile.components.join(", "),
+          touchedSymbols: fixProfile.touchedSymbols.join(", "),
+          testsChangedCount: fixProfile.testsChanged.length,
+          configFileCount: fixProfile.configFiles.length,
+          patchSummary: fixProfile.patchSummary,
+          resolutionType: implementationPattern.resolution_type,
+          createdFileCount: implementationPattern.created_files.length,
+          modifiedExistingFileCount:
+            implementationPattern.modified_existing_files.length,
+          deletedFileCount: implementationPattern.deleted_files.length,
+          labelWeight: implementationPattern.label_weight,
+        },
+      }),
+    );
+
+    records.push(
+      makeRecord({
+        id: `implementation-pattern:${pullRequest.number}`,
+        type: "implementation_pattern",
+        pullRequestNumber: pullRequest.number,
+        title: `Implementation pattern from PR #${pullRequest.number}: ${pullRequest.title}`,
+        url: pullRequest.html_url,
+        text: compactText([
+          formatImplementationPattern(implementationPattern),
+          pullRequest.body,
+        ]),
+        metadata: {
+          patternName: `${implementationPattern.resolution_type} in ${implementationPattern.components.join(", ") || "Unknown"}`,
+          intent: implementationPattern.title,
+          resolutionType: implementationPattern.resolution_type,
+          components: implementationPattern.components.join(", "),
+          areas: implementationPattern.areas.join("\n"),
+          surfaces: implementationPattern.surfaces.join(", "),
+          typicalFilesCreated: implementationPattern.created_files.join("\n"),
+          typicalFilesModified:
+            implementationPattern.modified_existing_files.join("\n"),
+          typicalTestsAdded:
+            implementationPattern.tests_added_or_modified.join("\n"),
+          examplePrs: String(implementationPattern.pr_number),
+          patternTags: implementationPattern.pattern_tags.join(", "),
+          labelWeight: implementationPattern.label_weight,
+          createdFileCount: implementationPattern.created_files.length,
+          modifiedExistingFileCount:
+            implementationPattern.modified_existing_files.length,
         },
       }),
     );

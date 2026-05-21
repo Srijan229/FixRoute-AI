@@ -1,12 +1,18 @@
 import {
   createEmbeddingProvider,
   cosineSimilarity,
+  loadCodeSemanticIndex,
   loadEmbeddingIndex,
   loadRichSemanticIndex,
 } from "./embeddings.js";
 import { fetchIssueEvidence } from "./graphQueries.js";
 import { mapFilePathToComponent } from "./componentMapper.js";
 import { getPathQuality } from "./pathQuality.js";
+import {
+  buildCanonicalIssueText,
+  buildSemanticIssueProfile,
+} from "./issueProfile.js";
+import { bm25Search, reciprocalRankFusion } from "./bm25.js";
 import type {
   QueryIssueResult,
   RecommendationResult,
@@ -32,6 +38,18 @@ type RichSemanticMatch = {
   record: RichSemanticRecord;
   score: number;
 };
+
+type CodeSemanticMatch = {
+  record: RichSemanticRecord;
+  score: number;
+};
+
+type RecommendationMode =
+  | "bug_localization"
+  | "feature_planning"
+  | "enhancement_planning"
+  | "specialized_routing"
+  | "general_triage";
 
 export type RecommendationInput = {
   title: string;
@@ -869,11 +887,310 @@ function loadOptionalRichSemanticMatches(
     return index.records
       .filter(
         (record) =>
-          record.type === "patch_hunk" || record.type === "review_comment",
+          record.type === "pull_request" ||
+          record.type === "implementation_pattern" ||
+          record.type === "patch_hunk" ||
+          record.type === "review_comment",
       )
       .filter((record) => {
         const qualityScore = record.metadata.pathQualityScore;
         return typeof qualityScore !== "number" || qualityScore >= 0.25;
+      })
+      .map((record) => ({
+        record,
+        score: cosineSimilarity(queryVector, record.vector),
+      }))
+      .sort((left, right) => right.score - left.score)
+      .slice(0, limit);
+  } catch {
+    return [];
+  }
+}
+
+function metadataList(
+  value: string | number | boolean | null | undefined,
+): string[] {
+  if (typeof value !== "string") {
+    return [];
+  }
+
+  return value
+    .split(/\r?\n|,/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function numberMetadata(
+  value: string | number | boolean | null | undefined,
+  fallback: number,
+): number {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  }
+
+  return fallback;
+}
+
+function overlapScore(left: string[], right: string[]): number {
+  if (left.length === 0 || right.length === 0) {
+    return 0;
+  }
+
+  const rightSet = new Set(right.map((value) => value.toLowerCase()));
+  const hits = left.filter((value) => rightSet.has(value.toLowerCase())).length;
+  return hits / Math.max(left.length, right.length);
+}
+
+function hasRegistryOrContributionFile(filePaths: string[]): boolean {
+  return filePaths.some((filePath) =>
+    /\b(contribution|registry|actions?|commands?|package\.json|menus?|configuration)\b/i.test(
+      filePath,
+    ),
+  );
+}
+
+function scoreImplementationPatternMatch(input: {
+  semanticScore: number;
+  queryResolutionType: string;
+  queryComponent: string;
+  querySurfaces: string[];
+  requiresNewFiles: boolean;
+  record: RichSemanticRecord;
+}): number {
+  const patternResolutionType =
+    typeof input.record.metadata.resolutionType === "string"
+      ? input.record.metadata.resolutionType
+      : "unknown";
+  const components = metadataList(input.record.metadata.components);
+  const surfaces = metadataList(input.record.metadata.surfaces);
+  const createdFiles = metadataList(input.record.metadata.typicalFilesCreated);
+  const modifiedFiles = metadataList(input.record.metadata.typicalFilesModified);
+  const labelWeight = numberMetadata(input.record.metadata.labelWeight, 0.5);
+  const createdFileCount = numberMetadata(
+    input.record.metadata.createdFileCount,
+    createdFiles.length,
+  );
+  const modifiedFileCount = numberMetadata(
+    input.record.metadata.modifiedExistingFileCount,
+    modifiedFiles.length,
+  );
+  const sameComponent =
+    input.queryComponent !== "Unknown" &&
+    components.includes(input.queryComponent)
+      ? 0.28
+      : 0;
+  const surfaceFit = overlapScore(input.querySurfaces, surfaces) * 0.24;
+  const createdShapeFit =
+    input.requiresNewFiles === createdFileCount > 0 ? 0.18 : -0.12;
+  const registryFit =
+    hasRegistryOrContributionFile(modifiedFiles) &&
+    input.querySurfaces.includes("ui")
+      ? 0.12
+      : 0;
+  const resolutionFit =
+    patternResolutionType === input.queryResolutionType
+      ? 0.18
+      : patternResolutionType === "unknown"
+        ? 0
+        : ["docs", "config", "test"].includes(patternResolutionType) &&
+            input.queryResolutionType !== patternResolutionType
+          ? -0.24
+          : -0.08;
+  const sizePenalty = Math.max(0.35, Math.min(1, labelWeight));
+  const breadthPenalty =
+    createdFileCount + modifiedFileCount > 12
+      ? 0.82
+      : createdFileCount + modifiedFileCount > 6
+        ? 0.92
+        : 1;
+
+  return (
+    (input.semanticScore * 0.58 +
+      sameComponent +
+      surfaceFit +
+      createdShapeFit +
+      registryFit +
+      resolutionFit) *
+    sizePenalty *
+    breadthPenalty
+  );
+}
+
+function modeForResolutionType(resolutionType: string): RecommendationMode {
+  if (resolutionType === "existing_bug") return "bug_localization";
+  if (resolutionType === "new_feature") return "feature_planning";
+  if (
+    resolutionType === "enhancement" ||
+    resolutionType === "enhancement_with_new_files"
+  ) {
+    return "enhancement_planning";
+  }
+
+  if (
+    resolutionType === "docs" ||
+    resolutionType === "config" ||
+    resolutionType === "test" ||
+    resolutionType === "refactor"
+  ) {
+    return "specialized_routing";
+  }
+
+  return "general_triage";
+}
+
+function newFileNameFromQuery(queryText: string, suffix: string): string {
+  const words = (queryText.toLowerCase().match(/[a-z0-9]+/g) || [])
+    .filter(
+      (word) =>
+        ![
+          "add",
+          "new",
+          "support",
+          "for",
+          "the",
+          "and",
+          "with",
+          "when",
+          "issue",
+          "feature",
+          "allow",
+          "users",
+          "to",
+        ].includes(word),
+    )
+    .slice(0, 4);
+  const [first = "new", ...rest] = words;
+  const stem = [
+    first,
+    ...rest.map((word) => word.charAt(0).toUpperCase() + word.slice(1)),
+  ].join("");
+
+  return `${stem || "newFeature"}${suffix}`;
+}
+
+function likelyNewFileSuggestions(input: {
+  queryText: string;
+  areas: Array<{ area_path: string; component: string }>;
+  mode: RecommendationMode;
+  targetComponent: string;
+}): Array<{ file_path: string; component: string; reason: string }> {
+  if (
+    input.mode !== "feature_planning" &&
+    input.mode !== "enhancement_planning"
+  ) {
+    return [];
+  }
+
+  const componentAreas = input.areas.filter(
+    (area) => area.component === input.targetComponent,
+  );
+  const selectedAreas =
+    componentAreas.length > 0 ? componentAreas : input.areas.slice(0, 1);
+
+  return selectedAreas.slice(0, 3).flatMap((area) => {
+    const baseName = newFileNameFromQuery(input.queryText, "");
+    const sourceFile = `${area.area_path}/${baseName}.ts`;
+    const testFile = `${area.area_path}/test/${baseName}.test.ts`;
+
+    return [
+      {
+        file_path: sourceFile,
+        component: area.component,
+        reason:
+          "Candidate new implementation file based on target area and naming conventions.",
+      },
+      {
+        file_path: testFile,
+        component: area.component,
+        reason: "Candidate test file paired with the new implementation file.",
+      },
+    ];
+  });
+}
+
+function implementationStepsForMode(mode: RecommendationMode): string[] {
+  if (mode === "feature_planning") {
+    return [
+      "Inspect existing contribution, command, service, and UI registration patterns in the recommended area.",
+      "Extend the closest existing entry point before creating new files.",
+      "Create new implementation files only where the existing area lacks the requested capability.",
+      "Add or update tests near the existing test conventions for that area.",
+      "Validate behavior against similar historical implementation PRs.",
+    ];
+  }
+
+  if (mode === "enhancement_planning") {
+    return [
+      "Inspect the current feature implementation and its tests.",
+      "Extend the existing behavior with the smallest compatible change.",
+      "Create a helper or new file only if the enhancement introduces a separable concept.",
+      "Update tests to cover the newly supported case.",
+    ];
+  }
+
+  if (mode === "specialized_routing") {
+    return [
+      "Confirm whether the change is docs, config, test, build, or refactor work.",
+      "Inspect the matching file category in the recommended area.",
+      "Keep implementation scope narrow unless related code changes are required.",
+    ];
+  }
+
+  return [];
+}
+
+function confidenceLabel(confidence: number): string {
+  if (confidence >= 0.75) return "high";
+  if (confidence >= 0.55) return "medium";
+  return "low";
+}
+
+function outputGuidanceForMode(mode: RecommendationMode): string {
+  if (mode === "feature_planning") {
+    return "Use likely implementation areas, files to inspect, possible new files, and similar patterns. Not enough evidence for exact file prediction.";
+  }
+
+  if (mode === "enhancement_planning") {
+    return "Use likely existing feature areas, files to extend, possible helper files, and similar enhancement patterns.";
+  }
+
+  if (mode === "bug_localization") {
+    return "Use likely existing files as investigation starting points, not guaranteed bug locations.";
+  }
+
+  if (mode === "specialized_routing") {
+    return "Use likely file categories and areas for docs/config/test/refactor routing.";
+  }
+
+  return "Routing is uncertain; treat all recommendations as candidate starting points for human review.";
+}
+
+function loadOptionalCodeSemanticMatches(
+  queryVector: number[],
+  limit: number,
+): CodeSemanticMatch[] {
+  try {
+    const index = loadCodeSemanticIndex();
+
+    if (
+      index.records.length === 0 ||
+      index.records[0].vector.length !== queryVector.length
+    ) {
+      return [];
+    }
+
+    return index.records
+      .filter((record) => {
+        if (!record.filePath) {
+          return false;
+        }
+
+        return getPathQuality(record.filePath).includeInSemanticIndex;
       })
       .map((record) => ({
         record,
@@ -905,15 +1222,51 @@ function formatLineRange(record: RichSemanticRecord): string {
   return "line range unavailable";
 }
 
+function impactAreaForFile(filePath: string): string {
+  const parts = filePath.split("/");
+
+  if (parts.length <= 2) {
+    return parts[0] || filePath;
+  }
+
+  if (filePath.startsWith("src/vs/workbench/contrib/") && parts.length >= 5) {
+    return parts.slice(0, Math.min(parts.length - 1, 7)).join("/");
+  }
+
+  if (filePath.startsWith("src/vs/platform/") && parts.length >= 5) {
+    return parts.slice(0, Math.min(parts.length - 1, 6)).join("/");
+  }
+
+  if (filePath.startsWith("src/vs/editor/") && parts.length >= 5) {
+    return parts.slice(0, Math.min(parts.length - 1, 6)).join("/");
+  }
+
+  if (filePath.startsWith("src/vs/sessions/") && parts.length >= 5) {
+    return parts.slice(0, Math.min(parts.length - 1, 6)).join("/");
+  }
+
+  if (filePath.startsWith("extensions/") && parts.length >= 4) {
+    return parts.slice(0, Math.min(parts.length - 1, 5)).join("/");
+  }
+
+  return parts.slice(0, Math.min(parts.length - 1, 4)).join("/") || filePath;
+}
+
 export async function generateRecommendation(
   input: RecommendationInput,
 ): Promise<RecommendationResult> {
   const normalized = normalizeInput(input);
   const provider = createEmbeddingProvider();
   const embeddingIndex = loadEmbeddingIndex();
-  const queryText = [normalized.title, normalized.description]
-    .filter((part) => part.length > 0)
-    .join("\n\n");
+  const queryProfile = buildSemanticIssueProfile({
+    title: normalized.title,
+    body: normalized.description,
+  });
+  const mode = modeForResolutionType(queryProfile.resolution_type);
+  const queryText = buildCanonicalIssueText({
+    title: normalized.title,
+    body: normalized.description,
+  });
   const queryVector = await provider.embedOne(queryText);
 
   if (embeddingIndex.length === 0) {
@@ -926,11 +1279,62 @@ export async function generateRecommendation(
     );
   }
 
-  const rankedCandidates = embeddingIndex
-    .map<RankedCandidate>((record) => {
+  const semanticCandidates = embeddingIndex
+    .map((record) => ({
+      record,
+      score: cosineSimilarity(queryVector, record.vector),
+    }))
+    .sort((left, right) => right.score - left.score);
+  const bm25Candidates = bm25Search(
+    queryText,
+    embeddingIndex.map((record) => ({
+      id: record.issueNumber,
+      text: record.text,
+    })),
+    Math.max(normalized.topK * 12, 60),
+  );
+  const semanticRankByIssue = new Map(
+    semanticCandidates.map((candidate, index) => [
+      candidate.record.issueNumber,
+      index,
+    ]),
+  );
+  const bm25ScoreByIssue = new Map(
+    bm25Candidates.map((candidate) => [candidate.id, candidate.score]),
+  );
+  const fusedIssueNumbers = reciprocalRankFusion(
+    [
+      semanticCandidates
+        .slice(0, Math.max(normalized.topK * 12, 60))
+        .map((candidate) => candidate.record.issueNumber),
+      bm25Candidates.map((candidate) => candidate.id),
+    ],
+    Math.max(normalized.topK * 12, 60),
+  );
+  const recordByIssue = new Map(
+    embeddingIndex.map((record) => [record.issueNumber, record]),
+  );
+  const maxBm25Score = Math.max(...bm25Candidates.map((candidate) => candidate.score), 1);
+  const rankedCandidates = fusedIssueNumbers
+    .map<RankedCandidate | null>((fusedCandidate) => {
+      const record = recordByIssue.get(fusedCandidate.id);
+
+      if (!record) {
+        return null;
+      }
+
       const semanticScore = cosineSimilarity(queryVector, record.vector);
       const lexicalScore = keywordScore(queryText, record.text);
-      const blendedScore = semanticScore * 0.65 + lexicalScore * 0.35;
+      const normalizedBm25Score =
+        (bm25ScoreByIssue.get(record.issueNumber) || 0) / maxBm25Score;
+      const semanticRankScore =
+        1 / ((semanticRankByIssue.get(record.issueNumber) || 0) + 1);
+      const blendedScore =
+        fusedCandidate.score * 10 +
+        semanticScore * 0.38 +
+        lexicalScore * 0.18 +
+        normalizedBm25Score * 0.32 +
+        semanticRankScore * 0.12;
 
       return {
         issueNumber: record.issueNumber,
@@ -942,10 +1346,15 @@ export async function generateRecommendation(
         lexicalScore,
       };
     })
+    .filter((candidate): candidate is RankedCandidate => candidate !== null)
     .sort((left, right) => right.score - left.score);
 
   const queryTokens = Array.from(new Set(tokenize(queryText)));
   const richSemanticMatches = loadOptionalRichSemanticMatches(
+    queryVector,
+    Math.max(normalized.topK * 8, 24),
+  );
+  const codeSemanticMatches = loadOptionalCodeSemanticMatches(
     queryVector,
     Math.max(normalized.topK * 4, 12),
   );
@@ -1012,6 +1421,22 @@ export async function generateRecommendation(
   >();
   let sessionsEvidenceCount = 0;
   let workbenchChatEvidenceCount = 0;
+  const similarImplementationPatterns: Array<{
+    pattern_name: string;
+    summary: string;
+    score: number;
+    example_prs: number[];
+  }> = [];
+  const similarFeaturePrs: Array<{
+    pull_request_number: number;
+    title: string;
+    url?: string;
+  }> = [];
+  const similarEnhancements: Array<{
+    pull_request_number: number;
+    title: string;
+    url?: string;
+  }> = [];
 
   matchedEvidence.forEach((result, index) => {
     const issueWeight = result.rerankedScore * rankWeight(index);
@@ -1073,8 +1498,149 @@ export async function generateRecommendation(
       }
     }
   });
+  const provisionalComponent =
+    topKey(componentScores) || queryProfile.componentHints[0] || "Unknown";
 
   for (const match of richSemanticMatches) {
+    if (match.record.type === "implementation_pattern") {
+      const patternResolutionType = match.record.metadata.resolutionType;
+
+      if (
+        mode === "bug_localization" &&
+        patternResolutionType !== "existing_bug"
+      ) {
+        continue;
+      }
+
+      const patternName =
+        typeof match.record.metadata.patternName === "string"
+          ? match.record.metadata.patternName
+          : match.record.title || "Implementation pattern";
+      const summary =
+        typeof match.record.metadata.intent === "string"
+          ? match.record.metadata.intent
+          : match.record.text.slice(0, 240);
+      const examplePrs = metadataList(match.record.metadata.examplePrs)
+        .map((value) => Number(value))
+        .filter((value) => Number.isFinite(value));
+      const pullRequestNumber = match.record.pullRequestNumber;
+      const patternScore = scoreImplementationPatternMatch({
+        semanticScore: match.score,
+        queryResolutionType: queryProfile.resolution_type,
+        queryComponent: provisionalComponent,
+        querySurfaces: queryProfile.likely_surface,
+        requiresNewFiles: queryProfile.requires_new_files,
+        record: match.record,
+      });
+
+      if (patternScore < 0.18) {
+        continue;
+      }
+
+      similarImplementationPatterns.push({
+        pattern_name: patternName,
+        summary,
+        score: Number(patternScore.toFixed(3)),
+        example_prs: examplePrs,
+      });
+
+      if (
+        pullRequestNumber &&
+        (patternResolutionType === "new_feature" ||
+          patternResolutionType === "enhancement")
+      ) {
+        const row = {
+          pull_request_number: pullRequestNumber,
+          title: match.record.title || patternName,
+          url: match.record.url,
+        };
+
+        if (patternResolutionType === "new_feature") {
+          similarFeaturePrs.push(row);
+        } else {
+          similarEnhancements.push(row);
+        }
+      }
+
+      for (const filePath of metadataList(
+        match.record.metadata.typicalFilesModified,
+      ).slice(0, 5)) {
+        const quality = getPathQuality(filePath);
+
+        if (!quality.includeInSemanticIndex) {
+          continue;
+        }
+
+        const component = mapFilePathToComponent(filePath);
+        const existingFile = fileScores.get(filePath);
+        const pathRelevance = filePathRelevanceScore(
+          queryText,
+          filePath,
+          component,
+        );
+        const score =
+          (patternScore * 0.12 + pathRelevance * 0.42) * quality.score;
+
+        fileScores.set(filePath, {
+          file_path: filePath,
+          component,
+          reason: existingFile
+            ? `${existingFile.reason}; Similar implementation pattern`
+            : "Similar implementation pattern",
+          score: (existingFile?.score || 0) + score,
+          line_ranges: existingFile?.line_ranges || [],
+        });
+      }
+
+      continue;
+    }
+
+    if (match.record.type === "pull_request") {
+      const primaryFiles = metadataList(match.record.metadata.primaryFiles);
+      const pullRequestNumber = match.record.pullRequestNumber;
+      const reason = pullRequestNumber
+        ? `Fix profile match from PR #${pullRequestNumber}`
+        : "Fix profile match from historical PR";
+
+      for (const [fileIndex, filePath] of primaryFiles.slice(0, 8).entries()) {
+        const quality = getPathQuality(filePath);
+
+        if (!quality.includeInSemanticIndex) {
+          continue;
+        }
+
+        const component = mapFilePathToComponent(filePath);
+        const existingFile = fileScores.get(filePath);
+        const pathRelevance = filePathRelevanceScore(
+          queryText,
+          filePath,
+          component,
+        );
+
+        if (!quality.includeInFocusedEvaluation && pathRelevance < 0.06) {
+          continue;
+        }
+
+        const rankDecay = fileIndex === 0 ? 1 : 1 / Math.sqrt(fileIndex + 1);
+        const familyBoost = pathFamilyBoost(queryText, filePath, component);
+        const score =
+          (match.score * 0.08 + pathRelevance * 0.58) *
+          quality.score *
+          rankDecay *
+          familyBoost;
+
+        fileScores.set(filePath, {
+          file_path: filePath,
+          component,
+          reason: existingFile ? `${existingFile.reason}; ${reason}` : reason,
+          score: (existingFile?.score || 0) + score,
+          line_ranges: existingFile?.line_ranges || [],
+        });
+      }
+
+      continue;
+    }
+
     if (!match.record.filePath) {
       continue;
     }
@@ -1082,7 +1648,6 @@ export async function generateRecommendation(
     const filePath = match.record.filePath;
     const component = mapFilePathToComponent(filePath);
     const existingFile = fileScores.get(filePath);
-    const lineRange = formatLineRange(match.record);
     const newStartLine = match.record.metadata.newStartLine;
     const newLineCount = match.record.metadata.newLineCount;
     const reviewLine = match.record.metadata.line;
@@ -1102,8 +1667,8 @@ export async function generateRecommendation(
           : null;
     const reason =
       match.record.type === "patch_hunk"
-        ? `Semantic patch match from PR #${match.record.pullRequestNumber} at ${lineRange}`
-        : `Semantic review comment match from PR #${match.record.pullRequestNumber} at ${lineRange}`;
+        ? `Semantic patch evidence from PR #${match.record.pullRequestNumber}`
+        : `Semantic review evidence from PR #${match.record.pullRequestNumber}`;
     const score =
       match.score * 0.85 +
       filePathRelevanceScore(queryText, filePath, component) * 0.35;
@@ -1206,6 +1771,45 @@ export async function generateRecommendation(
 
   const suggestedComponent = topKey(adjustedComponentScores) || "Unknown";
 
+  for (const match of codeSemanticMatches) {
+    if (!match.record.filePath) {
+      continue;
+    }
+
+    const filePath = match.record.filePath;
+    const component = mapFilePathToComponent(filePath);
+    const pathRelevance = filePathRelevanceScore(queryText, filePath, component);
+    const componentAligned = component === suggestedComponent;
+
+    if (!componentAligned && pathRelevance < 0.08) {
+      continue;
+    }
+
+    const quality = getPathQuality(filePath);
+
+    if (!quality.includeInFocusedEvaluation) {
+      continue;
+    }
+
+    const existingFile = fileScores.get(filePath);
+    const symbolName = match.record.metadata.symbolName;
+    const chunkType = match.record.metadata.chunkType;
+    const reason =
+      typeof symbolName === "string" && symbolName.length > 0
+        ? `Code semantic match in ${symbolName}`
+        : `Code semantic match in ${chunkType || "source chunk"}`;
+    const score =
+      match.score * (componentAligned ? 0.34 : 0.18) + pathRelevance * 0.55;
+
+    fileScores.set(filePath, {
+      file_path: filePath,
+      component,
+      reason: existingFile ? `${existingFile.reason}; ${reason}` : reason,
+      score: (existingFile?.score || 0) + score * quality.score,
+      line_ranges: existingFile?.line_ranges || [],
+    });
+  }
+
   const fileRows = Array.from(fileScores.values())
     .map((file) => ({
       ...file,
@@ -1221,24 +1825,159 @@ export async function generateRecommendation(
         left.file_path.localeCompare(right.file_path),
     )
     .slice(0, 10)
-    .map(({ score: _score, line_ranges, ...file }) => ({
-      ...file,
-      ...(line_ranges.length > 0 ? { line_ranges } : {}),
+    .map(({ score: _score, line_ranges: _lineRanges, ...file }) => file);
+  const areaScores = new Map<
+    string,
+    {
+      area_path: string;
+      component: string;
+      reason: string;
+      score: number;
+      supporting_files: Set<string>;
+    }
+  >();
+
+  for (const file of Array.from(fileScores.values())) {
+    const areaPath = impactAreaForFile(file.file_path);
+    const existingArea = areaScores.get(areaPath);
+    const areaScore =
+      file.score * (file.component === suggestedComponent ? 1.1 : 0.85);
+
+    areaScores.set(areaPath, {
+      area_path: areaPath,
+      component: existingArea?.component || file.component,
+      reason:
+        existingArea?.reason ||
+        `Historical fixes touched files under ${areaPath}`,
+      score: (existingArea?.score || 0) + areaScore,
+      supporting_files: new Set([
+        ...(existingArea?.supporting_files || []),
+        file.file_path,
+      ]),
+    });
+  }
+
+  const areaRows = Array.from(areaScores.values())
+    .sort(
+      (left, right) =>
+        right.score - left.score ||
+        left.area_path.localeCompare(right.area_path),
+    )
+    .slice(0, 8)
+    .map(({ score: _score, supporting_files, ...area }) => ({
+      ...area,
+      supporting_files: Array.from(supporting_files.values()).slice(0, 5),
     }));
 
   const evidencePath = matchedEvidence
     .flatMap((result) => result.evidence.evidencePaths)
     .slice(0, 10);
   const topSimilar = similarTickets[0];
+  const likelyComponents = Array.from(adjustedComponentScores.entries())
+    .sort((left, right) => right[1] - left[1])
+    .slice(0, 5)
+    .map(([component, score]) => ({
+      component,
+      reason: "Ranked from similar issues, graph evidence, semantic matches, and query/component affinity.",
+      confidence: Number(Math.min(0.95, Math.max(0.05, score)).toFixed(3)),
+    }));
+  const likelyNewFiles = likelyNewFileSuggestions({
+    queryText,
+    areas: areaRows,
+    mode,
+    targetComponent: suggestedComponent,
+  });
+  const possibleNewFiles =
+    mode === "enhancement_planning" ? likelyNewFiles : [];
+  const plannedNewFiles =
+    mode === "feature_planning" ? likelyNewFiles : [];
+  const likelyNewDirectories = Array.from(
+    new Set(
+      [...plannedNewFiles, ...possibleNewFiles].map((file) =>
+        impactAreaForFile(file.file_path),
+      ),
+    ),
+  ).slice(0, 5);
+  const existingFilesToInspect =
+    mode === "feature_planning" ||
+    mode === "enhancement_planning" ||
+    mode === "specialized_routing"
+      ? fileRows.slice(0, 8)
+      : [];
+  const existingFilesToExtend =
+    mode === "feature_planning" || mode === "enhancement_planning"
+      ? fileRows
+          .filter((file) => file.component === suggestedComponent)
+          .slice(0, 6)
+      : [];
+  const likelyExistingFiles =
+    mode === "bug_localization" || mode === "general_triage"
+      ? fileRows
+      : [];
+  const similarFixPrs = matchedEvidence
+    .flatMap((result) => result.evidence.linkedPullRequests)
+    .map((pullRequest) => ({
+      pull_request_number: pullRequest.number,
+      title: pullRequest.title,
+      url: pullRequest.url,
+    }))
+    .slice(0, 8);
+  const limitations = [
+    mode === "feature_planning"
+      ? "This issue likely requires new implementation. Not enough evidence for exact file prediction; use likely implementation areas, files to inspect, possible new files, and similar patterns."
+      : "",
+    mode === "enhancement_planning"
+      ? "This issue likely extends existing behavior. Prioritize files to inspect/extend before creating new files."
+      : "",
+    mode === "general_triage"
+      ? "Resolution type is uncertain; human review is recommended before assigning implementation work."
+      : "",
+    queryProfile.confidence < 0.55
+      ? "Resolution-type confidence is low because the issue text has weak routing signals."
+      : "",
+  ].filter(Boolean);
 
   return {
+    mode,
+    resolution_type: queryProfile.resolution_type,
+    likely_components: likelyComponents,
+    likely_areas: areaRows,
+    limitations,
+    routing: {
+      requires_new_files: queryProfile.requires_new_files,
+      requires_existing_file_edits: queryProfile.requires_existing_file_edits,
+      likely_surface: queryProfile.likely_surface,
+      implementation_scope: queryProfile.implementation_scope,
+      new_file_probability: queryProfile.new_file_probability,
+      existing_file_edit_probability: queryProfile.existing_file_edit_probability,
+      non_code_probability: queryProfile.non_code_probability,
+      reasoning: queryProfile.reasoning,
+      evidence_terms: queryProfile.evidence_terms,
+      confidence_label: confidenceLabel(queryProfile.confidence),
+      output_guidance: outputGuidanceForMode(mode),
+    },
+    likely_existing_files: likelyExistingFiles,
+    existing_files_to_inspect: existingFilesToInspect,
+    existing_files_to_extend: existingFilesToExtend,
+    likely_new_files: plannedNewFiles,
+    possible_new_files: possibleNewFiles,
+    likely_new_directories: likelyNewDirectories,
+    similar_implementation_patterns: similarImplementationPatterns
+      .sort((left, right) => right.score - left.score)
+      .slice(0, 8),
+    similar_feature_prs: similarFeaturePrs.slice(0, 8),
+    similar_fix_prs: similarFixPrs,
+    similar_enhancements: similarEnhancements.slice(0, 8),
+    suggested_implementation_steps: implementationStepsForMode(mode),
     ticket_type: inferTicketType(normalized.title, normalized.description),
     suggested_component: suggestedComponent,
     suggested_team:
       suggestedComponent === "Unknown"
         ? "Unknown"
         : `${suggestedComponent} Team`,
-    confidence: Number((topSimilar?.candidate.score || 0).toFixed(3)),
+    confidence: Number(
+      Math.min(1, Math.max(0, topSimilar?.candidate.score || 0)).toFixed(3),
+    ),
     similar_tickets: similarTickets.map((candidate) => ({
       issue_number: candidate.candidate.issueNumber,
       title: candidate.candidate.title,
@@ -1247,6 +1986,7 @@ export async function generateRecommendation(
       url: candidate.candidate.url,
     })),
     likely_impacted_files: fileRows,
+    likely_impacted_areas: areaRows,
     past_fix_pattern:
       matchedEvidence[0]?.evidence.linkedPullRequests[0]?.title ||
       "Review the linked historical pull requests for recurring file and component patterns.",
@@ -1254,7 +1994,9 @@ export async function generateRecommendation(
       ? {
           issue_number: topSimilar.candidate.issueNumber,
           title: topSimilar.candidate.title,
-          confidence: Number(topSimilar.candidate.score.toFixed(3)),
+          confidence: Number(
+            Math.min(1, Math.max(0, topSimilar.candidate.score)).toFixed(3),
+          ),
         }
       : {
           issue_number: "",
