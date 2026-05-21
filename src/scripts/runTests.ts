@@ -3,6 +3,12 @@ import { buildResolutionGroundTruth } from "../lib/resolutionEvaluation.js";
 import { classifyIssueResolution } from "../lib/resolutionType.js";
 import { buildSemanticIssueProfile } from "../lib/issueProfile.js";
 import { buildImplementationPattern } from "../lib/implementationPattern.js";
+import {
+  extractImportsFromSource,
+  extractSymbolsFromSource,
+  inferTestLinks,
+  touchedSymbolsForPatch,
+} from "../lib/symbolIndex.js";
 import type { BenchmarkCase, RichDataset } from "../lib/types.js";
 
 function testResolutionClassifier(): void {
@@ -173,11 +179,61 @@ function testResolutionGroundTruth(): void {
   assert.equal(truth?.actual_created_files, true);
 }
 
+function testSymbolIndexExtraction(): void {
+  const filePath = "src/vs/workbench/contrib/chat/browser/chatExportAction.ts";
+  const text = [
+    "import { ChatHistoryService } from './chatHistoryService';",
+    "export class ChatExportAction {",
+    "  async run() {",
+    "    return ChatHistoryService.exportHistory();",
+    "  }",
+    "}",
+    "export const CHAT_EXPORT_COMMAND_ID = 'chat.exportHistory';",
+    "registerCommand('chat.exportHistory', () => undefined);",
+  ].join("\n");
+  const symbols = extractSymbolsFromSource({
+    repoOwner: "microsoft",
+    repoName: "vscode",
+    filePath,
+    text,
+  });
+  const imports = extractImportsFromSource({
+    filePath,
+    text,
+    knownFiles: new Set([
+      filePath,
+      "src/vs/workbench/contrib/chat/browser/chatHistoryService.ts",
+    ]),
+  });
+  const testLinks = inferTestLinks([
+    "src/vs/workbench/contrib/chat/browser/chatExportAction.ts",
+    "src/vs/workbench/contrib/chat/test/browser/chatExportAction.test.ts",
+  ]);
+  const touchedSymbols = touchedSymbolsForPatch({
+    pullRequestNumber: 42,
+    filePath,
+    patchText: "+export class ChatExportAction {}",
+    symbolsByFile: new Map([[filePath, symbols]]),
+  });
+
+  assert.ok(symbols.some((symbol) => symbol.name === "ChatExportAction"));
+  assert.ok(symbols.some((symbol) => symbol.kind === "command"));
+  assert.equal(
+    imports[0]?.resolvedFile,
+    "src/vs/workbench/contrib/chat/browser/chatHistoryService.ts",
+  );
+  assert.equal(testLinks[0]?.sourceFile, filePath);
+  assert.ok(
+    touchedSymbols.some((symbol) => symbol.symbolName === "ChatExportAction"),
+  );
+}
+
 function main(): void {
   testResolutionClassifier();
   testCanonicalIssueProfile();
   testImplementationPatternExtraction();
   testResolutionGroundTruth();
+  testSymbolIndexExtraction();
   console.log("All tests passed");
 }
 

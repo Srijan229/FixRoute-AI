@@ -14,6 +14,7 @@
     "clone:target-repo": "tsx src/scripts/cloneTargetRepo.ts",
     "extract:patch-hunks": "tsx src/scripts/extractPatchHunks.ts",
     "index:code": "tsx src/scripts/indexCodeChunks.ts",
+    "index:symbols": "tsx src/scripts/indexSymbols.ts",
     "normalize:rich": "tsx src/scripts/normalizeRichDataset.ts",
     "normalize:graph": "tsx src/scripts/normalizeGraph.ts",
     "build:graph": "tsx src/scripts/buildGraph.ts",

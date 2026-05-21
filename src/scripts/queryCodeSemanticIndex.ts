@@ -62,6 +62,30 @@ function preview(text: string): string {
   return text.replace(/\s+/g, " ").trim().slice(0, 240);
 }
 
+function tokenize(text: string): string[] {
+  return (text.toLowerCase().match(/[a-z0-9_./-]+/g) || []).filter(
+    (token) => token.length >= 3,
+  );
+}
+
+function keywordScore(queryText: string, candidateText: string): number {
+  const queryTokens = Array.from(new Set(tokenize(queryText)));
+  const candidateTokens = new Set(tokenize(candidateText));
+
+  if (queryTokens.length === 0) {
+    return 0;
+  }
+
+  return (
+    queryTokens.filter((token) =>
+      Array.from(candidateTokens).some(
+        (candidateToken) =>
+          candidateToken.includes(token) || token.includes(candidateToken),
+      ),
+    ).length / queryTokens.length
+  );
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const provider = createEmbeddingProvider();
@@ -70,13 +94,28 @@ async function main() {
   const results = index.records
     .map((record) => ({
       id: record.id,
+      type: record.type,
       filePath: record.filePath,
       component: record.metadata.component,
       symbolName: record.metadata.symbolName,
+      symbolKind: record.metadata.symbolKind,
       startLine: record.metadata.startLine,
       endLine: record.metadata.endLine,
-      score: cosineSimilarity(queryVector, record.vector),
+      semanticScore: cosineSimilarity(queryVector, record.vector),
+      lexicalScore: keywordScore(
+        args.query,
+        [
+          record.title || "",
+          record.filePath || "",
+          String(record.metadata.symbolName || ""),
+          String(record.metadata.symbolKind || ""),
+        ].join(" "),
+      ),
       preview: preview(record.text),
+    }))
+    .map((record) => ({
+      ...record,
+      score: record.semanticScore + record.lexicalScore * 0.42,
     }))
     .sort((left, right) => right.score - left.score)
     .slice(0, args.topK);

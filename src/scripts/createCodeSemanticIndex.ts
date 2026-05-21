@@ -7,6 +7,7 @@ import type {
   CodeChunkDataset,
   RichSemanticIndex,
   RichSemanticRecord,
+  SymbolIndexDataset,
 } from "../lib/types.js";
 
 const CODE_CHUNKS_PATH = path.resolve(
@@ -16,12 +17,22 @@ const CODE_CHUNKS_PATH = path.resolve(
   "code",
   "codeChunks.json",
 );
+const SYMBOL_INDEX_PATH = path.resolve(
+  process.cwd(),
+  "data",
+  "processed",
+  "code",
+  "symbolIndex.json",
+);
 const OUTPUT_PATH = path.resolve(
   process.cwd(),
   process.env.CODE_SEMANTIC_INDEX_FILE_PATH ||
     "data/processed/semantic/codeSemanticIndex.json",
 );
 const BATCH_SIZE = Number(process.env.CODE_SEMANTIC_BATCH_SIZE || 50);
+const SYMBOL_SEMANTIC_LIMIT = Number(
+  process.env.CODE_SYMBOL_SEMANTIC_LIMIT || 50000,
+);
 
 function loadCodeChunks(): CodeChunkDataset {
   if (!fs.existsSync(CODE_CHUNKS_PATH)) {
@@ -31,6 +42,16 @@ function loadCodeChunks(): CodeChunkDataset {
   return JSON.parse(
     fs.readFileSync(CODE_CHUNKS_PATH, "utf8"),
   ) as CodeChunkDataset;
+}
+
+function loadOptionalSymbolIndex(): SymbolIndexDataset | null {
+  if (!fs.existsSync(SYMBOL_INDEX_PATH)) {
+    return null;
+  }
+
+  return JSON.parse(
+    fs.readFileSync(SYMBOL_INDEX_PATH, "utf8"),
+  ) as SymbolIndexDataset;
 }
 
 function chunkArray<T>(items: T[], batchSize: number): T[][] {
@@ -52,7 +73,24 @@ async function main() {
   const env = loadSemanticEnv();
   const provider = createEmbeddingProvider();
   const codeDataset = loadCodeChunks();
-  const pendingRecords = codeDataset.chunks.map((chunk) => ({
+  const symbolIndex = loadOptionalSymbolIndex();
+  const selectedSymbols = (symbolIndex?.symbols || [])
+    .sort((left, right) => {
+      const priority = (symbol: { kind: string; exported: boolean }) =>
+        (symbol.exported ? 4 : 0) +
+        (symbol.kind === "command" ? 5 : 0) +
+        (symbol.kind === "contribution" ? 4 : 0) +
+        (symbol.kind === "class" || symbol.kind === "function" ? 3 : 0) +
+        (symbol.kind === "interface" || symbol.kind === "type" ? 2 : 0);
+
+      return (
+        priority(right) - priority(left) ||
+        left.filePath.localeCompare(right.filePath) ||
+        left.name.localeCompare(right.name)
+      );
+    })
+    .slice(0, SYMBOL_SEMANTIC_LIMIT);
+  const pendingCodeChunkRecords = codeDataset.chunks.map((chunk) => ({
     id: `code-chunk:${chunk.id}`,
     type: "code_chunk" as const,
     filePath: chunk.filePath,
@@ -74,6 +112,34 @@ async function main() {
       chunk.text,
     ].join("\n\n"),
   }));
+  const pendingSymbolRecords =
+    selectedSymbols.map((symbol) => ({
+      id: `code-symbol:${symbol.id}`,
+      type: "code_symbol" as const,
+      filePath: symbol.filePath,
+      title: symbol.name,
+      metadata: {
+        repoOwner: symbol.repoOwner,
+        repoName: symbol.repoName,
+        component: symbol.component,
+        language: symbol.language,
+        symbolName: symbol.name,
+        symbolKind: symbol.kind,
+        exported: symbol.exported,
+        startLine: symbol.startLine,
+        endLine: symbol.endLine,
+        signature: symbol.signature,
+      },
+      text: [
+        `Code symbol ${symbol.name}`,
+        `Kind: ${symbol.kind}`,
+        `File: ${symbol.filePath}`,
+        `Component: ${symbol.component}`,
+        `Signature: ${symbol.signature}`,
+        symbol.context,
+      ].join("\n\n"),
+    }));
+  const pendingRecords = [...pendingCodeChunkRecords, ...pendingSymbolRecords];
   const records: RichSemanticRecord[] = [];
   const batches = chunkArray(pendingRecords, BATCH_SIZE);
 
@@ -83,6 +149,9 @@ async function main() {
     provider: env.EMBEDDING_PROVIDER,
     dimension: env.EMBEDDING_DIMENSION,
     recordCount: pendingRecords.length,
+    codeChunkRecordCount: pendingCodeChunkRecords.length,
+    symbolRecordCount: pendingSymbolRecords.length,
+    symbolRecordLimit: SYMBOL_SEMANTIC_LIMIT,
   });
 
   for (let index = 0; index < batches.length; index += 1) {
@@ -114,7 +183,8 @@ async function main() {
       sourcePath: CODE_CHUNKS_PATH,
       recordCount: records.length,
       countsByType: {
-        code_chunk: records.length,
+        code_chunk: pendingCodeChunkRecords.length,
+        code_symbol: pendingSymbolRecords.length,
       },
     },
     records,

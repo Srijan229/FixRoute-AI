@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import path from "node:path";
+
 import {
   createEmbeddingProvider,
   cosineSimilarity,
@@ -17,6 +20,7 @@ import type {
   QueryIssueResult,
   RecommendationResult,
   RichSemanticRecord,
+  SymbolIndexDataset,
 } from "./types.js";
 
 type RankedCandidate = {
@@ -43,6 +47,13 @@ type CodeSemanticMatch = {
   record: RichSemanticRecord;
   score: number;
 };
+
+type SymbolRelationshipIndex = {
+  importsBySourceFile: Map<string, string[]>;
+  testsBySourceFile: Map<string, string[]>;
+};
+
+let cachedSymbolRelationships: SymbolRelationshipIndex | null = null;
 
 type RecommendationMode =
   | "bug_localization"
@@ -1179,8 +1190,64 @@ function outputGuidanceForMode(mode: RecommendationMode): string {
   return "Routing is uncertain; treat all recommendations as candidate starting points for human review.";
 }
 
+function loadOptionalSymbolRelationships(): SymbolRelationshipIndex {
+  if (cachedSymbolRelationships) {
+    return cachedSymbolRelationships;
+  }
+
+  const symbolIndexPath = path.resolve(
+    process.cwd(),
+    "data",
+    "processed",
+    "code",
+    "symbolIndex.json",
+  );
+  const emptyIndex = {
+    importsBySourceFile: new Map<string, string[]>(),
+    testsBySourceFile: new Map<string, string[]>(),
+  };
+
+  try {
+    if (!fs.existsSync(symbolIndexPath)) {
+      cachedSymbolRelationships = emptyIndex;
+      return emptyIndex;
+    }
+
+    const dataset = JSON.parse(
+      fs.readFileSync(symbolIndexPath, "utf8"),
+    ) as SymbolIndexDataset;
+    const importsBySourceFile = new Map<string, string[]>();
+    const testsBySourceFile = new Map<string, string[]>();
+
+    for (const importRecord of dataset.imports) {
+      if (!importRecord.resolvedFile) {
+        continue;
+      }
+
+      importsBySourceFile.set(importRecord.sourceFile, [
+        ...(importsBySourceFile.get(importRecord.sourceFile) || []),
+        importRecord.resolvedFile,
+      ]);
+    }
+
+    for (const testLink of dataset.testLinks) {
+      testsBySourceFile.set(testLink.sourceFile, [
+        ...(testsBySourceFile.get(testLink.sourceFile) || []),
+        testLink.testFile,
+      ]);
+    }
+
+    cachedSymbolRelationships = { importsBySourceFile, testsBySourceFile };
+    return cachedSymbolRelationships;
+  } catch {
+    cachedSymbolRelationships = emptyIndex;
+    return emptyIndex;
+  }
+}
+
 function loadOptionalCodeSemanticMatches(
   queryVector: number[],
+  queryText: string,
   limit: number,
 ): CodeSemanticMatch[] {
   try {
@@ -1201,10 +1268,23 @@ function loadOptionalCodeSemanticMatches(
 
         return getPathQuality(record.filePath).includeInSemanticIndex;
       })
-      .map((record) => ({
-        record,
-        score: cosineSimilarity(queryVector, record.vector),
-      }))
+      .map((record) => {
+        const semanticScore = cosineSimilarity(queryVector, record.vector);
+        const lexicalScore = keywordScore(
+          queryText,
+          [
+            record.title || "",
+            record.filePath || "",
+            String(record.metadata.symbolName || ""),
+            String(record.metadata.symbolKind || ""),
+          ].join(" "),
+        );
+
+        return {
+          record,
+          score: semanticScore + lexicalScore * 0.42,
+        };
+      })
       .sort((left, right) => right.score - left.score)
       .slice(0, limit);
   } catch {
@@ -1365,8 +1445,10 @@ export async function generateRecommendation(
   );
   const codeSemanticMatches = loadOptionalCodeSemanticMatches(
     queryVector,
+    queryText,
     Math.max(normalized.topK * 4, 12),
   );
+  const symbolRelationships = loadOptionalSymbolRelationships();
   const candidatePool = rankedCandidates.slice(
     0,
     Math.max(normalized.topK * 8, 24),
@@ -1802,13 +1884,29 @@ export async function generateRecommendation(
 
     const existingFile = fileScores.get(filePath);
     const symbolName = match.record.metadata.symbolName;
+    const symbolKind = match.record.metadata.symbolKind;
     const chunkType = match.record.metadata.chunkType;
+    const isSymbolMatch = match.record.type === "code_symbol";
+    const symbolTextRelevance = keywordScore(
+      queryText,
+      [
+        String(symbolName || ""),
+        String(symbolKind || ""),
+        match.record.title || "",
+        filePath,
+      ].join(" "),
+    );
     const reason =
       typeof symbolName === "string" && symbolName.length > 0
-        ? `Code semantic match in ${symbolName}`
+        ? isSymbolMatch
+          ? `Symbol semantic match: ${symbolName}${typeof symbolKind === "string" ? ` (${symbolKind})` : ""}`
+          : `Code semantic match in ${symbolName}`
         : `Code semantic match in ${chunkType || "source chunk"}`;
     const score =
-      match.score * (componentAligned ? 0.34 : 0.18) + pathRelevance * 0.55;
+      match.score *
+        (componentAligned ? (isSymbolMatch ? 0.46 : 0.34) : isSymbolMatch ? 0.24 : 0.18) +
+      pathRelevance * 0.55 +
+      symbolTextRelevance * (isSymbolMatch ? 0.42 : 0.18);
 
     fileScores.set(filePath, {
       file_path: filePath,
@@ -1817,6 +1915,38 @@ export async function generateRecommendation(
       score: (existingFile?.score || 0) + score * quality.score,
       line_ranges: existingFile?.line_ranges || [],
     });
+
+    if (isSymbolMatch) {
+      for (const relatedFile of [
+        ...(symbolRelationships.testsBySourceFile.get(filePath) || []),
+        ...(symbolRelationships.importsBySourceFile.get(filePath) || []).slice(0, 4),
+      ]) {
+        const relatedQuality = getPathQuality(relatedFile);
+
+        if (!relatedQuality.includeInFocusedEvaluation) {
+          continue;
+        }
+
+        const relatedComponent = mapFilePathToComponent(relatedFile);
+        const existingRelatedFile = fileScores.get(relatedFile);
+        const relatedReason =
+          relatedFile.includes("/test/") || /\.test\./.test(relatedFile)
+            ? `Test linked to symbol match ${symbolName || filePath}`
+            : `Import neighbor of symbol match ${symbolName || filePath}`;
+
+        fileScores.set(relatedFile, {
+          file_path: relatedFile,
+          component: relatedComponent,
+          reason: existingRelatedFile
+            ? `${existingRelatedFile.reason}; ${relatedReason}`
+            : relatedReason,
+          score:
+            (existingRelatedFile?.score || 0) +
+            match.score * 0.16 * relatedQuality.score,
+          line_ranges: existingRelatedFile?.line_ranges || [],
+        });
+      }
+    }
   }
 
   const fileRows = Array.from(fileScores.values())

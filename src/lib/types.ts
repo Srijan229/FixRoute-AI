@@ -194,6 +194,74 @@ export type CodeChunkDataset = {
   };
 };
 
+export type CodeSymbolKind =
+  | "class"
+  | "interface"
+  | "type"
+  | "function"
+  | "method"
+  | "constant"
+  | "enum"
+  | "command"
+  | "contribution"
+  | "unknown";
+
+export type CodeSymbol = {
+  id: string;
+  repoOwner: string;
+  repoName: string;
+  filePath: string;
+  component: string;
+  language: string;
+  name: string;
+  kind: CodeSymbolKind;
+  exported: boolean;
+  startLine: number;
+  endLine: number;
+  signature: string;
+  context: string;
+};
+
+export type FileImport = {
+  sourceFile: string;
+  importedPath: string;
+  importedSymbols: string[];
+  resolvedFile: string | null;
+};
+
+export type TestLink = {
+  testFile: string;
+  sourceFile: string;
+  confidence: number;
+  reason: string;
+};
+
+export type PullRequestTouchedSymbol = {
+  pullRequestNumber: number;
+  filePath: string;
+  symbolId: string;
+  symbolName: string;
+  symbolKind: CodeSymbolKind;
+};
+
+export type SymbolIndexDataset = {
+  symbols: CodeSymbol[];
+  imports: FileImport[];
+  testLinks: TestLink[];
+  pullRequestTouchedSymbols: PullRequestTouchedSymbol[];
+  metadata: {
+    repoOwner: string;
+    repoName: string;
+    sourcePath: string;
+    fileCount: number;
+    symbolCount: number;
+    importCount: number;
+    testLinkCount: number;
+    pullRequestTouchedSymbolCount: number;
+    generatedAt: string;
+  };
+};
+
 export type GitHubTimelineCrossReferenceEvent = {
   event?: string;
   source?: {
@@ -338,7 +406,8 @@ export type SemanticRecordType =
   | "review_comment"
   | "patch_hunk"
   | "implementation_pattern"
-  | "code_chunk";
+  | "code_chunk"
+  | "code_symbol";
 
 export type RichSemanticRecord = {
   id: string;

@@ -153,6 +153,7 @@ npm run fetch:pr-reviews
 npm run fetch:pr-review-comments
 npm run clone:target-repo
 npm run extract:patch-hunks
+npm run index:symbols
 npm run normalize:rich
 npm run normalize:graph
 npm run build:graph
@@ -184,7 +185,7 @@ Query semantic indexes:
 
 ```bash
 npm run query:semantic -- --query "terminal crash when stopping node process" --top-k 5
-npm run query:code -- --query "layout controls title bar editor actions" --top-k 5
+npm run query:code -- --query "ChatExportAction export chat history" --top-k 5
 ```
 
 Generate a recommendation:
@@ -296,6 +297,28 @@ New-file prediction is intentionally separate from resolution type:
 This lets the system keep conservative issue classification while still warning
 that helper files, tests, providers, commands, or other new implementation files
 may be needed.
+
+## Symbol-Aware Indexing
+
+FixRoute AI also builds a symbol-aware code memory layer:
+
+```bash
+npm run index:symbols
+npm run create:code-semantic-index
+```
+
+The symbol index extracts:
+
+- exported symbols
+- classes, interfaces, types, functions, methods, constants, and enums
+- command IDs and contribution registrations
+- file imports and resolved local import targets
+- source/test naming links
+- PR-to-symbol touches inferred from patch hunks
+
+The code semantic index includes both `code_chunk` and `code_symbol` records.
+Symbol matches are used to boost defining files, related test files, and import
+neighbors during recommendation.
 
 ## Neo4j Graph
 
